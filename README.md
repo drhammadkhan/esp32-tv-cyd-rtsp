@@ -14,6 +14,8 @@ There's two projects in this repo - one for the ESP32 firmware and another for t
 
 The README files in each project have more details.
 
+The server also supports Docker deployment. See `server/README.md` for `docker build`, `docker run`, and `docker compose` instructions.
+
 # How Does It Work?
 
 The server is pretty simple, it has a few endpoints:

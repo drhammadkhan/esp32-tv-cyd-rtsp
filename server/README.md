@@ -55,3 +55,53 @@ Optional restart loop:
 ```bash
 ./run_rtsp_server.sh
 ```
+
+# Docker
+
+Build image:
+
+```bash
+cd server
+docker build -t esp32-tv-server .
+```
+
+Run with RTSP mode (recommended for CYD):
+
+```bash
+docker run --rm -it \
+  -p 8124:8124 \
+  -e VIDEO_SERVER_PORT=8124 \
+  -e RTSP_URL='rtsp://user:pass@camera:8554/Streaming/Channels/102' \
+  -e JPEG_QUALITY=76 \
+  -e SWAP_RB=0 \
+  -e CONTRAST=1.14 \
+  -e BRIGHTNESS=-6 \
+  -e SATURATION=1.22 \
+  -e STREAM_PRESET=balanced \
+  -v "$(pwd)/cache:/app/cache" \
+  esp32-tv-server
+```
+
+Run with movie mode (no RTSP_URL):
+
+```bash
+docker run --rm -it \
+  -p 8124:8124 \
+  -e VIDEO_SERVER_PORT=8124 \
+  -v "$(pwd)/movies:/app/movies" \
+  -v "$(pwd)/cache:/app/cache" \
+  esp32-tv-server
+```
+
+Open the web UI:
+
+```text
+http://<server-ip>:8124/admin
+```
+
+Optional compose setup:
+
+```bash
+cd server
+docker compose up -d --build
+```
