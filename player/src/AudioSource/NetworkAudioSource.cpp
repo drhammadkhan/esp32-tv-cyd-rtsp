@@ -1,0 +1,64 @@
+#include <Arduino.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <Stream.h>
+#include <string>
+#include "NetworkAudioSource.h"
+#include "../ChannelData/NetworkChannelData.h"
+
+#define SAMPLES_PER_CHUNK 16000
+
+NetworkAudioSource::NetworkAudioSource(NetworkChannelData *channelData): mChannelData(channelData)
+{
+}
+
+int NetworkAudioSource::getAudioSamples(uint8_t **buffer, size_t &bufferSize, int currentAudioSample)
+{
+  if (WiFi.status() == WL_CONNECTED)
+  {
+    // resize the buffer if needed
+    if (bufferSize < SAMPLES_PER_CHUNK)
+    {
+      *buffer = (uint8_t *)realloc(*buffer, SAMPLES_PER_CHUNK);
+      bufferSize = SAMPLES_PER_CHUNK;
+    }
+    std::string url = mChannelData->getAudioURL() + "/" + std::to_string(currentAudioSample) + "/" + std::to_string(bufferSize);
+    http.begin(url.c_str());
+    int httpCode = http.GET();
+    if (httpCode == HTTP_CODE_OK)
+    {
+      // read the audio data into the buffer
+      int audioLength = http.getSize();
+      if (audioLength > 0) {
+        http.getStreamPtr()->readBytes((uint8_t *) *buffer, audioLength);
+      } else {
+        Stream *stream = http.getStreamPtr();
+        int total = 0;
+        unsigned long lastRead = millis();
+        while (stream && (stream->available() > 0 || millis() - lastRead < 200))
+        {
+          int available = stream->available();
+          if (available <= 0)
+          {
+            vTaskDelay(1 / portTICK_PERIOD_MS);
+            continue;
+          }
+          if (total + available > (int)bufferSize)
+          {
+            *buffer = (uint8_t *)realloc(*buffer, total + available + 1024);
+            bufferSize = total + available + 1024;
+          }
+          int read = stream->readBytes((uint8_t *)*buffer + total, available);
+          if (read > 0)
+          {
+            total += read;
+            lastRead = millis();
+          }
+        }
+        audioLength = total;
+      }
+      return audioLength;
+    }
+  }
+  return 0;
+}
