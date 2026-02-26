@@ -508,6 +508,58 @@ def _fit_frame(frame):
     return resized[y0:y0 + target_h, x0:x0 + target_w]
 
 
+def _resize_jpeg_to(jpeg_bytes: bytes, size: tuple[int, int], quality: int = 80) -> bytes:
+    arr = np.frombuffer(jpeg_bytes, dtype=np.uint8)
+    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if img is None:
+        return jpeg_bytes
+    img = _fit_frame_for_size(img, size)
+    ok, out = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), int(quality)])
+    if not ok:
+        return jpeg_bytes
+    return out.tobytes()
+
+
+def _fit_frame_for_size(frame, target_size):
+    target_w, target_h = target_size
+    src_h, src_w = frame.shape[:2]
+    if src_w == 0 or src_h == 0:
+        return np.zeros((target_h, target_w, 3), dtype=np.uint8)
+    scale = max(target_w / src_w, target_h / src_h)
+    resized_w = int(src_w * scale)
+    resized_h = int(src_h * scale)
+    interpolation = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR
+    resized = cv2.resize(frame, (resized_w, resized_h), interpolation=interpolation)
+    x0 = (resized_w - target_w) // 2
+    y0 = (resized_h - target_h) // 2
+    return resized[y0:y0 + target_h, x0:x0 + target_w]
+
+
+def _get_frame_bytes(channel_index, ms):
+    if _is_rtsp_mode():
+        _set_active_stream_from_channel(channel_index)
+        with latest_lock:
+            return latest_jpeg if latest_jpeg is not None else _encode_black_frame()
+    _ensure_movies_loaded()
+    audio, frames = video_data[channel_index % len(video_data)]
+    # use binary search to find the closest frame
+    start = 0
+    end = len(frames) - 1
+    while start <= end:
+        mid = (start + end) // 2
+        if frames[mid][0] == ms:
+            return frames[mid][1]
+        elif frames[mid][0] < ms:
+            start = mid + 1
+        else:
+            end = mid - 1
+    if end < 0:
+        end = 0
+    elif start >= len(frames):
+        start = len(frames) - 1
+    return frames[start][1]
+
+
 def _enhance_frame(frame, contrast, brightness, saturation, preset):
     # Mild contrast/brightness correction plus saturation lift for CYD TFT.
     frame = cv2.convertScaleAbs(frame, alpha=contrast, beta=brightness)
@@ -637,30 +689,16 @@ def get_audio(channel_index, start, length):
 
 @app.route('/frame/<int:channel_index>/<int:ms>')
 def get_frame(channel_index, ms):
-    if _is_rtsp_mode():
-        _set_active_stream_from_channel(channel_index)
-        with latest_lock:
-            data = latest_jpeg if latest_jpeg is not None else _encode_black_frame()
-        return Response(data, mimetype='image/jpeg')
-    _ensure_movies_loaded()
-    audio, frames = video_data[channel_index % len(video_data)]
-    # use binary search to find the closest frame
-    start = 0
-    end = len(frames) - 1
-    while start <= end:
-        mid = (start + end) // 2
-        if frames[mid][0] == ms:
-            return Response(frames[mid][1], mimetype='image/jpeg')
-        elif frames[mid][0] < ms:
-            start = mid + 1
-        else:
-            end = mid - 1
-    # we may not find the exact frame, so return the closest frame
-    if end < 0:
-        end = 0
-    elif start >= len(frames):
-        start = len(frames) - 1
-    return Response(frames[start][1], mimetype='image/jpeg')
+    data = _get_frame_bytes(channel_index, ms)
+    return Response(data, mimetype='image/jpeg')
+
+
+@app.route('/frame_tdisplay/<int:channel_index>/<int:ms>')
+def get_frame_tdisplay(channel_index, ms):
+    data = _get_frame_bytes(channel_index, ms)
+    # TTGO T-Display screen is 240x135; send matching stream dimensions.
+    data = _resize_jpeg_to(data, (240, 135), quality=78)
+    return Response(data, mimetype='image/jpeg')
 
 
 @app.route("/preview.mjpg")

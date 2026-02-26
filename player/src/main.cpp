@@ -46,6 +46,10 @@
 #define VIDEO_SERVER_PORT_STR STRINGIFY(VIDEO_SERVER_PORT)
 #endif
 
+#ifndef FRAME_ENDPOINT
+#define FRAME_ENDPOINT "frame"
+#endif
+
 #ifdef DISABLE_AUDIO
 #warning "Audio disabled for higher frame rate"
 #endif
@@ -149,7 +153,7 @@ void setup()
     videoServerPort = VIDEO_SERVER_PORT;
   }
   snprintf(TUNING_SERVER_INFO, sizeof(TUNING_SERVER_INFO), "%s:%d", VIDEO_SERVER_HOST, videoServerPort);
-  snprintf(FRAME_URL, sizeof(FRAME_URL), "http://%s:%d/frame", VIDEO_SERVER_HOST, videoServerPort);
+  snprintf(FRAME_URL, sizeof(FRAME_URL), "http://%s:%d/%s", VIDEO_SERVER_HOST, videoServerPort, FRAME_ENDPOINT);
   snprintf(AUDIO_URL, sizeof(AUDIO_URL), "http://%s:%d/audio", VIDEO_SERVER_HOST, videoServerPort);
   snprintf(CHANNEL_INFO_URL, sizeof(CHANNEL_INFO_URL), "http://%s:%d/channel_info", VIDEO_SERVER_HOST, videoServerPort);
   Serial.printf("Using video server: %s:%d\n", VIDEO_SERVER_HOST, videoServerPort);
