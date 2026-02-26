@@ -169,7 +169,7 @@ services:
 3. After deploy:
 - Open `http://<casaos-host-ip>:8124/admin`
 - Set `RTSP URL` and tuning in the web UI
-- In firmware flasher, choose target board (`Cheap Yellow Display` or `TTGO T-Display`) and flash
+- In firmware flasher, choose target board (`Cheap Yellow Display`, `TTGO T-Display`, or `ESP32-S3 2.8" 240x320`) and flash
 - Point device firmware to `<casaos-host-ip>:8124`
 
 Notes:

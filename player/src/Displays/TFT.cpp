@@ -27,7 +27,10 @@ TFT::TFT(): tft(new TFT_eSPI()) {
   tft->initDMA();
   #endif
   tft->setSwapBytes(true);
-  tft->invertDisplay(true);
+  #ifndef TFT_INVERT_DISPLAY
+  #define TFT_INVERT_DISPLAY 1
+  #endif
+  tft->invertDisplay(TFT_INVERT_DISPLAY);
   tft->fillScreen(TFT_BLACK);
   tft->setTextFont(2);
   tft->setTextSize(2);

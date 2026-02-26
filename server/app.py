@@ -129,6 +129,25 @@ FLASH_TARGETS = {
             },
         },
     },
+    "esp32_s3_2p8": {
+        "label": "ESP32-S3 2.8\" 240x320",
+        "usb_env": {
+            "audio_on": "esp32-s3-2p8-wifi",
+            "no_audio": "esp32-s3-2p8-wifi-no-audio",
+        },
+        "webflash": {
+            "audio_on": {
+                "bootloader": "esp32s3-2p8-bootloader-audio.bin",
+                "partitions": "esp32s3-2p8-partitions-audio.bin",
+                "template": "esp32s3-2p8-template-firmware-audio.bin",
+            },
+            "no_audio": {
+                "bootloader": "esp32s3-2p8-bootloader-no-audio.bin",
+                "partitions": "esp32s3-2p8-partitions-no-audio.bin",
+                "template": "esp32s3-2p8-template-firmware-no-audio.bin",
+            },
+        },
+    },
 }
 
 webflash_lock = threading.Lock()
@@ -1315,6 +1334,7 @@ def admin_ui():
           <select id="fw_board">
             <option value="cyd">Cheap Yellow Display (ESP32-2432S028R)</option>
             <option value="ttgo_tdisplay">TTGO T-Display</option>
+            <option value="esp32_s3_2p8">ESP32-S3 2.8&quot; 240x320</option>
           </select>
         </div>
         <div class="row">
@@ -1363,6 +1383,7 @@ def admin_ui():
             <select id="webflash_board">
               <option value="cyd">Cheap Yellow Display (ESP32-2432S028R)</option>
               <option value="ttgo_tdisplay">TTGO T-Display</option>
+              <option value="esp32_s3_2p8">ESP32-S3 2.8&quot; 240x320</option>
             </select>
           </div>
           <div class="row">

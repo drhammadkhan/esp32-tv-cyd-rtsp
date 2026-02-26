@@ -41,12 +41,16 @@ This repo now includes a CYD-focused RTSP workflow with tuned color/contrast and
 
 - `cheap-yellow-display` : audio enabled
 - `cheap-yellow-display-no-audio` : audio disabled for better frame rate
+- `esp32-s3-2p8-wifi` : ESP32-S3 + 2.8" 240x320 (audio enabled)
+- `esp32-s3-2p8-wifi-no-audio` : ESP32-S3 + 2.8" 240x320 (higher FPS)
 
 Build and flash from `player/`:
 
 ```bash
 python3 -m platformio run -e cheap-yellow-display -t upload
 python3 -m platformio run -e cheap-yellow-display-no-audio -t upload
+python3 -m platformio run -e esp32-s3-2p8-wifi -t upload
+python3 -m platformio run -e esp32-s3-2p8-wifi-no-audio -t upload
 ```
 
 ## RTSP Server Mode
