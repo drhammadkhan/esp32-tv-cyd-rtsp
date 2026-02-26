@@ -14,7 +14,7 @@ There's two projects in this repo - one for the ESP32 firmware and another for t
 
 The README files in each project have more details.
 
-The server also supports Docker deployment. See `server/README.md` for `docker build`, `docker run`, and `docker compose` instructions.
+The server supports Docker deployment with prebuilt GHCR images and CasaOS-ready compose examples. See `server/README.md`.
 
 # How Does It Work?
 

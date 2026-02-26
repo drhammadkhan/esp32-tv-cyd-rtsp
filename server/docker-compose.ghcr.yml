@@ -1,0 +1,12 @@
+services:
+  esp32-tv-server:
+    image: ghcr.io/drhammadkhan/esp32-tv-cyd-rtsp-server:latest
+    container_name: esp32-tv-server
+    ports:
+      - "8124:8124"
+    env_file:
+      - .env
+    volumes:
+      - ./movies:/app/movies
+      - ./cache:/app/cache
+    restart: unless-stopped

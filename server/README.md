@@ -58,6 +58,21 @@ Optional restart loop:
 
 # Docker
 
+## Quick Deploy (Prebuilt Image)
+
+```bash
+cd server
+cp .env.example .env
+# edit .env with your RTSP URL and tuning values
+docker compose -f docker-compose.ghcr.yml up -d
+```
+
+Container image:
+
+```bash
+docker pull ghcr.io/drhammadkhan/esp32-tv-cyd-rtsp-server:latest
+```
+
 Prebuilt image (from GitHub Container Registry):
 
 ```bash
@@ -111,6 +126,49 @@ Optional compose setup:
 cd server
 docker compose up -d --build
 ```
+
+## CasaOS / Similar UI Container Hosts
+
+1. Create host folders:
+```bash
+mkdir -p /DATA/AppData/esp32-tv-server/movies
+mkdir -p /DATA/AppData/esp32-tv-server/cache
+```
+
+2. In CasaOS:
+- Open `App Store` -> `Custom Install` -> `Import compose`
+- Paste this stack:
+
+```yaml
+services:
+  esp32-tv-server:
+    image: ghcr.io/drhammadkhan/esp32-tv-cyd-rtsp-server:latest
+    container_name: esp32-tv-server
+    ports:
+      - "8124:8124"
+    environment:
+      VIDEO_SERVER_PORT: "8124"
+      RTSP_URL: "rtsp://user:pass@camera:8554/Streaming/Channels/102"
+      JPEG_QUALITY: "76"
+      SWAP_RB: "0"
+      CONTRAST: "1.14"
+      BRIGHTNESS: "-6"
+      SATURATION: "1.22"
+      STREAM_PRESET: "balanced"
+    volumes:
+      - /DATA/AppData/esp32-tv-server/movies:/app/movies
+      - /DATA/AppData/esp32-tv-server/cache:/app/cache
+    restart: unless-stopped
+```
+
+3. After deploy:
+- Open `http://<casaos-host-ip>:8124/admin`
+- Set `RTSP URL` and tuning in the web UI
+- Point CYD firmware to `<casaos-host-ip>:8124`
+
+Notes:
+- Container deployment supports streaming/admin UI fully.
+- Firmware USB flashing from the web UI is disabled in container runtime (no local `player/` source tree by default). Use a local checkout for USB flashing.
 
 ## GitHub Container Publishing
 

@@ -77,6 +77,10 @@ def _set_capture_state(status=None, source=None, last_error=None):
             capture_state["last_error"] = last_error
 
 
+def _flash_supported():
+    return PLAYER_DIR.exists()
+
+
 def _append_flash_log(line):
     with flash_lock:
         flash_state["log_lines"].append(line.rstrip())
@@ -102,6 +106,16 @@ def _write_local_overrides(ssid, password, host, port):
 
 
 def _run_flash_job(job):
+    if not _flash_supported():
+        with flash_lock:
+            flash_state["running"] = False
+            flash_state["status"] = "failed"
+            flash_state["last_error"] = "Firmware source tree not available in this runtime"
+            flash_state["last_exit_code"] = -1
+            flash_state["last_finished_ms"] = _now_ms()
+        _append_flash_log("ERROR: firmware flashing is disabled in this deployment")
+        return
+
     env_name = "cheap-yellow-display-no-audio" if job["flavor"] == "no_audio" else "cheap-yellow-display"
     cmd = ["python3", "-m", "platformio", "run", "-e", env_name, "-t", "upload"]
     if job.get("upload_port"):
@@ -426,11 +440,17 @@ def api_flash_status():
         data["active_job"] = dict(flash_state["active_job"])
         data["log_lines"] = list(flash_state["log_lines"])
     data["ports"] = _list_serial_ports()
+    data["supported"] = _flash_supported()
+    if not data["supported"] and not data["last_error"]:
+        data["last_error"] = "Firmware flasher disabled: player source tree not present (typical in container runtime)."
     return jsonify(data)
 
 
 @app.route("/api/flash", methods=["POST"])
 def api_flash_start():
+    if not _flash_supported():
+        return jsonify({"ok": False, "error": "Firmware flasher disabled in this deployment. Use local checkout for USB flashing."}), 501
+
     payload = request.get_json(silent=True) or {}
     flavor = str(payload.get("flavor", "audio_on")).strip()
     ssid = str(payload.get("ssid", "")).strip()
@@ -857,6 +877,7 @@ def admin_ui():
     async function loadFlashStatus() {
       const res = await fetch("/api/flash/status");
       const data = await res.json();
+      const supported = !!data.supported;
       const status = data.status || "idle";
       const running = !!data.running;
       const label = running ? `Running: ${status}` : `Last: ${status}`;
@@ -868,6 +889,11 @@ def admin_ui():
       if (!document.getElementById("fw_upload_port").value && ports.length === 1) {
         document.getElementById("fw_upload_port").value = ports[0];
       }
+      document.getElementById("flash_btn").disabled = !supported || running;
+      document.getElementById("refresh_flash_btn").disabled = false;
+      ["fw_flavor","fw_upload_port","fw_ssid","fw_password","fw_server_host","fw_server_port"].forEach((id) => {
+        document.getElementById(id).disabled = !supported || running;
+      });
     }
 
     async function startFlash() {
