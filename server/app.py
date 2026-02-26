@@ -1233,7 +1233,7 @@ def admin_ui():
         </div>
         <div class="row">
           <label for="fw_ssid">Wi-Fi SSID</label>
-          <input id="fw_ssid" type="text" placeholder="Your Wi-Fi name" />
+          <input id="fw_ssid" type="text" placeholder="Your Wi-Fi name" value="Homelan" />
         </div>
         <div class="row">
           <label for="fw_password">Wi-Fi Password</label>
@@ -1270,7 +1270,7 @@ def admin_ui():
           </div>
           <div class="row">
             <label for="webflash_ssid">Wi-Fi SSID</label>
-            <input id="webflash_ssid" type="text" placeholder="Your Wi-Fi name" />
+            <input id="webflash_ssid" type="text" placeholder="Your Wi-Fi name" value="Homelan" />
           </div>
           <div class="row">
             <label for="webflash_password">Wi-Fi Password</label>
