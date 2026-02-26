@@ -170,6 +170,22 @@ Notes:
 - Container deployment supports streaming/admin UI fully.
 - Firmware USB flashing from the web UI is disabled in container runtime (no local `player/` source tree by default). Use a local checkout for USB flashing.
 
+## CasaOS App Store Source (One-Click App Entry)
+
+This repo includes a CasaOS app definition at:
+
+- `Apps/ESP32-TV-Server/docker-compose.yml`
+
+If your CasaOS version supports custom app stores from GitHub, add this repo:
+
+- `https://github.com/drhammadkhan/esp32-tv-cyd-rtsp`
+
+Then install `ESP32 TV Server` directly from the custom store.
+
+If your CasaOS version only supports compose import, use this raw manifest URL:
+
+- `https://raw.githubusercontent.com/drhammadkhan/esp32-tv-cyd-rtsp/main/Apps/ESP32-TV-Server/docker-compose.yml`
+
 ## GitHub Container Publishing
 
 This repo includes a workflow that publishes the server image to GHCR on pushes to `main`:

@@ -15,6 +15,7 @@ There's two projects in this repo - one for the ESP32 firmware and another for t
 The README files in each project have more details.
 
 The server supports Docker deployment with prebuilt GHCR images and CasaOS-ready compose examples. See `server/README.md`.
+For CasaOS app-store style install, see `Apps/ESP32-TV-Server/docker-compose.yml`.
 
 # How Does It Work?
 
