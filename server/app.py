@@ -1241,7 +1241,7 @@ def admin_ui():
         </div>
         <div class="row">
           <label for="fw_server_host">Server Host/IP</label>
-          <input id="fw_server_host" type="text" placeholder="192.168.1.72" />
+          <input id="fw_server_host" type="text" placeholder="192.168.1.16" />
         </div>
         <div class="row">
           <label for="fw_server_port">Server Port</label>
@@ -1278,7 +1278,7 @@ def admin_ui():
           </div>
           <div class="row">
             <label for="webflash_server_host">Server Host/IP</label>
-            <input id="webflash_server_host" type="text" placeholder="192.168.1.72" />
+            <input id="webflash_server_host" type="text" placeholder="192.168.1.16" />
           </div>
           <div class="row">
             <label for="webflash_server_port">Server Port</label>
@@ -1548,7 +1548,7 @@ def admin_ui():
     function populateFirmwareDefaultsFromSettings() {
       const url = document.getElementById("rtsp_url").value || "";
       const m = url.match(/@([^:/]+)(?::\\d+)?\\//);
-      document.getElementById("fw_server_host").value = (m && m[1]) ? m[1] : "192.168.1.72";
+      document.getElementById("fw_server_host").value = (m && m[1]) ? m[1] : "192.168.1.16";
       document.getElementById("fw_server_port").value = 8124;
       document.getElementById("webflash_server_host").value = document.getElementById("fw_server_host").value;
       document.getElementById("webflash_server_port").value = document.getElementById("fw_server_port").value;
