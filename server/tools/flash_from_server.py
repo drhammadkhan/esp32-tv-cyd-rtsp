@@ -2,6 +2,7 @@
 import argparse
 import json
 import os
+from pathlib import Path
 import subprocess
 import sys
 import tempfile
@@ -18,6 +19,22 @@ CHIP_FAMILY_MAP = {
     "ESP32-C6": "esp32c6",
     "ESP32-H2": "esp32h2",
 }
+
+
+def _find_boot_app0() -> str:
+    override = os.environ.get("ESP_BOOT_APP0_BIN", "").strip()
+    if override:
+        p = Path(override).expanduser()
+        if p.exists():
+            return str(p)
+    candidates = [
+        Path.home() / ".platformio" / "packages" / "framework-arduinoespressif32" / "tools" / "partitions" / "boot_app0.bin",
+        Path.home() / ".platformio" / "packages" / "framework-espidf" / "components" / "bootloader" / "subproject" / "main" / "bootloader.bin",
+    ]
+    for p in candidates:
+        if p.exists():
+            return str(p)
+    return ""
 
 
 def _http_json(method: str, url: str, payload=None, timeout=30):
@@ -120,7 +137,7 @@ def main():
         return 2
 
     with tempfile.TemporaryDirectory(prefix="esp32-webflash-") as tmp:
-        flash_pairs = []
+        flash_parts = []
         print(f"Preparing files in {tmp}")
         for idx, part in enumerate(parts):
             offset = int(part["offset"])
@@ -129,7 +146,33 @@ def main():
             local_path = os.path.join(tmp, filename)
             print(f"Downloading {part_url}")
             _download(part_url, local_path)
-            flash_pairs.extend([hex(offset), local_path])
+            flash_parts.append([offset, local_path])
+
+        # Some manifests use generic web offsets (0x1000/0x8000/0x10000) and omit boot_app0.
+        # ESP32-S3 needs the bootloader at 0x0000 in this project; all chips need boot_app0 at 0xE000 after erase.
+        if chip == "esp32s3":
+            for item in flash_parts:
+                if item[0] == 0x1000:
+                    print("Adjusting ESP32-S3 bootloader offset: 0x1000 -> 0x0000")
+                    item[0] = 0x0000
+                    break
+
+        has_boot_app0 = any(off == 0xE000 for off, _ in flash_parts)
+        if not has_boot_app0 and chip.startswith("esp32"):
+            boot_app0 = _find_boot_app0()
+            if boot_app0:
+                print(f"Injecting boot_app0 at 0xE000 from: {boot_app0}")
+                flash_parts.append([0xE000, boot_app0])
+            else:
+                print(
+                    "WARNING: boot_app0.bin not found; if device fails to boot, set ESP_BOOT_APP0_BIN and retry.",
+                    file=sys.stderr,
+                )
+
+        flash_parts.sort(key=lambda x: x[0])
+        flash_pairs = []
+        for off, path in flash_parts:
+            flash_pairs.extend([hex(off), path])
 
         if args.erase_first:
             erase_cmd = [

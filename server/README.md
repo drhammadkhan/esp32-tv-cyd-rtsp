@@ -103,6 +103,7 @@ Notes:
 - Add `--erase-first` if you want a full flash erase before writing.
 - If chip auto-detect fails, pass `--chip esp32` or `--chip esp32s3`.
 - Requires `esptool` (`pip install -r server/requirements.txt`).
+- The CLI now auto-fixes ESP32-S3 boot layout (bootloader offset + `boot_app0` at `0xE000`).
 
 # Docker
 
