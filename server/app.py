@@ -5,6 +5,7 @@ import time
 import json
 import secrets
 import tempfile
+import hashlib
 from pathlib import Path
 
 import cv2
@@ -16,7 +17,37 @@ app = Flask(__name__)
 
 FRAME_SIZE = (320, 240)
 VIDEO_SERVER_PORT = int(os.getenv("VIDEO_SERVER_PORT", "8123"))
-APP_VERSION = os.getenv("APP_VERSION", "0f22f71")
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _detect_app_version():
+    env_version = os.getenv("APP_VERSION", "").strip()
+    if env_version:
+        return env_version
+    try:
+        git_sha = subprocess.check_output(
+            ["git", "-C", str(REPO_ROOT), "rev-parse", "--short=8", "HEAD"],
+            text=True,
+        ).strip()
+        if git_sha:
+            return git_sha
+    except Exception:
+        pass
+    hasher = hashlib.sha1()
+    for candidate in (
+        Path(__file__),
+        REPO_ROOT / "server" / "requirements.txt",
+        REPO_ROOT / "server" / "Dockerfile",
+    ):
+        try:
+            hasher.update(candidate.read_bytes())
+        except OSError:
+            continue
+    digest = hasher.hexdigest()[:8]
+    return f"build-{digest}" if digest else "build-unknown"
+
+
+APP_VERSION = _detect_app_version()
 
 settings_lock = threading.Lock()
 settings = {
@@ -52,7 +83,7 @@ latest_jpeg = None
 latest_lock = threading.Lock()
 running = False
 
-PLAYER_DIR = (Path(__file__).resolve().parent.parent / "player").resolve()
+PLAYER_DIR = (REPO_ROOT / "player").resolve()
 LOCAL_OVERRIDES_PATH = PLAYER_DIR / "src" / "LocalOverrides.h"
 SETTINGS_PATH = (Path(__file__).resolve().parent / "cache" / "settings.json").resolve()
 STATIC_FIRMWARE_DIR = (Path(__file__).resolve().parent / "static" / "firmware").resolve()

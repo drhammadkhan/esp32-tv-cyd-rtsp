@@ -97,13 +97,23 @@ void TFT::drawChannel(int channelIndex) {
   }
 }
 
-void TFT::drawTuningText() {
+void TFT::drawTuningText(const char *serverInfo) {
   if (mDisplayMutex != NULL) {
     xSemaphoreTakeRecursive(mDisplayMutex, portMAX_DELAY);
   }
+  tft->fillScreen(TFT_BLACK);
+  tft->setTextSize(2);
   tft->setCursor(20, 20);
   tft->setTextColor(TFT_GREEN, TFT_BLACK);
   tft->println("TUNING...");
+  if (serverInfo != nullptr && serverInfo[0] != '\0') {
+    tft->setTextSize(1);
+    tft->setCursor(20, 56);
+    tft->setTextColor(TFT_WHITE, TFT_BLACK);
+    tft->print("Server: ");
+    tft->println(serverInfo);
+    tft->setTextSize(2);
+  }
   if (mDisplayMutex != NULL) {
     xSemaphoreGiveRecursive(mDisplayMutex);
   }

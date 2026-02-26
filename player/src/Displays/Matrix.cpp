@@ -46,10 +46,15 @@ void Matrix::drawChannel(int channelIndex) {
   dma_display->printf("%d", channelIndex);
 }
 
-void Matrix::drawTuningText() {
+void Matrix::drawTuningText(const char *serverInfo) {
   dma_display->setCursor(20, 20);
   dma_display->setTextColor(0xffff, 0x0000);
   dma_display->println("TUNING...");
+  if (serverInfo != nullptr && serverInfo[0] != '\0') {
+    dma_display->setCursor(0, 34);
+    dma_display->setTextColor(0xffff, 0x0000);
+    dma_display->println(serverInfo);
+  }
 }
 
 void Matrix::drawSDCardFailed() {

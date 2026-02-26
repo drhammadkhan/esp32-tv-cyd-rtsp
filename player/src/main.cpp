@@ -53,6 +53,7 @@
 char FRAME_URL[128] = {0};
 char AUDIO_URL[128] = {0};
 char CHANNEL_INFO_URL[128] = {0};
+char TUNING_SERVER_INFO[80] = {0};
 
 #ifdef HAS_IR_REMOTE
 RemoteInput *remoteInput = NULL;
@@ -147,6 +148,7 @@ void setup()
   if (videoServerPort <= 0 || videoServerPort > 65535) {
     videoServerPort = VIDEO_SERVER_PORT;
   }
+  snprintf(TUNING_SERVER_INFO, sizeof(TUNING_SERVER_INFO), "%s:%d", VIDEO_SERVER_HOST, videoServerPort);
   snprintf(FRAME_URL, sizeof(FRAME_URL), "http://%s:%d/frame", VIDEO_SERVER_HOST, videoServerPort);
   snprintf(AUDIO_URL, sizeof(AUDIO_URL), "http://%s:%d/audio", VIDEO_SERVER_HOST, videoServerPort);
   snprintf(CHANNEL_INFO_URL, sizeof(CHANNEL_INFO_URL), "http://%s:%d/channel_info", VIDEO_SERVER_HOST, videoServerPort);
@@ -213,7 +215,7 @@ void setup()
   );
   videoPlayer->start();
 #ifndef HAS_IR_REMOTE
-  display.drawTuningText();
+  display.drawTuningText(TUNING_SERVER_INFO);
   // get the channel info
   while(!channelData->fetchChannelData()) {
     Serial.println("Failed to fetch channel data");
@@ -365,7 +367,7 @@ void loop()
       Serial.printf("Free PSRAM: %d\n", ESP.getFreePsram());
 
       videoPlayer->stop();
-      display.drawTuningText();
+      display.drawTuningText(TUNING_SERVER_INFO);
       Serial.println("POWER");
       // get the channel info
       while(!channelData->fetchChannelData()) {

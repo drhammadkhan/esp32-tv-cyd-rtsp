@@ -11,7 +11,7 @@ class Display {
   virtual int height() = 0;
   virtual void fillScreen(uint16_t color) = 0;
   virtual void drawChannel(int channelIndex) = 0;
-  virtual void drawTuningText() = 0;
+  virtual void drawTuningText(const char *serverInfo = nullptr) = 0;
   virtual void drawFPS(int fps) = 0;
   virtual bool hasTouch() { return false; }
   virtual bool getTouchPoint(uint16_t *x, uint16_t *y) {
@@ -27,4 +27,3 @@ class Display {
 namespace DisplayColors {
   static const uint16_t BLACK = Display::color565(0, 0, 0);
 }
-

@@ -22,7 +22,7 @@ public:
   int height();
   void fillScreen(uint16_t color);
   void drawChannel(int channelIndex);
-  void drawTuningText();
+  void drawTuningText(const char *serverInfo = nullptr);
   void drawFPS(int fps);
   void drawSDCardFailed();
   bool hasTouch();
