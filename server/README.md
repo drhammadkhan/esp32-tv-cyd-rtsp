@@ -55,6 +55,17 @@ The `/admin` UI now supports multiple saved RTSP streams. In RTSP mode:
 - CYD channel up/down (or touch swipe on CYD, right-to-left for next) switches streams
 - settings are persisted in `server/cache/settings.json`
 
+## ESP32-S3 ES3N28P Display Support
+
+The server and web flasher now support the Spotpear ESP32-S3 2.8" ILI9341V board profile:
+
+- Firmware target: `esp32-s3-2p8-wifi` / `esp32-s3-2p8-wifi-no-audio`
+- Validated mapping: `SCLK=12`, `MISO=13`, `MOSI=11`, `CS=10`, `DC=46`, `RST=-1`, `BL=45`
+- Includes custom panel init and orientation/mirroring fix in firmware
+
+For full firmware-side details, see:
+- `README.md` (repo root), section `ESP32-S3 ES3N28P (Spotpear) Notes`
+
 Optional restart loop:
 
 ```bash
