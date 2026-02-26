@@ -3,6 +3,7 @@ import subprocess
 import threading
 import time
 import json
+import secrets
 from pathlib import Path
 
 import cv2
@@ -52,6 +53,15 @@ running = False
 PLAYER_DIR = (Path(__file__).resolve().parent.parent / "player").resolve()
 LOCAL_OVERRIDES_PATH = PLAYER_DIR / "src" / "LocalOverrides.h"
 SETTINGS_PATH = (Path(__file__).resolve().parent / "cache" / "settings.json").resolve()
+STATIC_FIRMWARE_DIR = (Path(__file__).resolve().parent / "static" / "firmware").resolve()
+
+WEBFLASH_SSID_TOKEN = b"CFG_WIFI_SSID_PLACEHOLDER_XXXXXXXXXXXXXXXX"
+WEBFLASH_PASSWORD_TOKEN = b"CFG_WIFI_PASSWORD_PLACEHOLDER_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+WEBFLASH_HOST_TOKEN = b"CFG_VIDEO_SERVER_HOST_PLACEHOLDER_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+WEBFLASH_PORT_TOKEN = b"8124P"
+
+webflash_lock = threading.Lock()
+webflash_payloads = {}
 
 flash_lock = threading.Lock()
 flash_state = {
@@ -260,6 +270,7 @@ def _write_local_overrides(ssid, password, host, port):
 #define WIFI_PASSWORD "{_escape_c_string(password)}"
 #define VIDEO_SERVER_HOST "{_escape_c_string(host)}"
 #define VIDEO_SERVER_PORT {int(port)}
+#define VIDEO_SERVER_PORT_STR "{int(port)}"
 """
     LOCAL_OVERRIDES_PATH.write_text(content, encoding="utf-8")
 
@@ -350,6 +361,46 @@ def _encode_black_frame():
     frame = np.zeros((FRAME_SIZE[1], FRAME_SIZE[0], 3), dtype=np.uint8)
     ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
     return buf.tobytes() if ok else b""
+
+
+def _webflash_templates_exist():
+    required = [
+        STATIC_FIRMWARE_DIR / "bootloader-audio.bin",
+        STATIC_FIRMWARE_DIR / "partitions-audio.bin",
+        STATIC_FIRMWARE_DIR / "template-firmware-audio.bin",
+        STATIC_FIRMWARE_DIR / "bootloader-no-audio.bin",
+        STATIC_FIRMWARE_DIR / "partitions-no-audio.bin",
+        STATIC_FIRMWARE_DIR / "template-firmware-no-audio.bin",
+    ]
+    return all(p.exists() for p in required)
+
+
+def _cleanup_webflash_payloads():
+    cutoff = _now_ms() - (30 * 60 * 1000)
+    with webflash_lock:
+        stale = [k for k, v in webflash_payloads.items() if v.get("created_ms", 0) < cutoff]
+        for k in stale:
+            del webflash_payloads[k]
+
+
+def _patch_token(blob: bytes, token: bytes, value: str, max_len: int) -> bytes:
+    raw = value.encode("utf-8")
+    if len(raw) > max_len:
+        raise ValueError(f"value too long for token (max {max_len})")
+    if token not in blob:
+        raise ValueError("firmware token not found")
+    replacement = raw + b"\x00" + (b"\x00" * (len(token) - len(raw) - 1))
+    return blob.replace(token, replacement, 1)
+
+
+def _build_custom_webflash_firmware(flavor: str, ssid: str, password: str, server_host: str, server_port: int) -> bytes:
+    template_name = "template-firmware-no-audio.bin" if flavor == "no_audio" else "template-firmware-audio.bin"
+    blob = (STATIC_FIRMWARE_DIR / template_name).read_bytes()
+    blob = _patch_token(blob, WEBFLASH_SSID_TOKEN, ssid, 32)
+    blob = _patch_token(blob, WEBFLASH_PASSWORD_TOKEN, password, 63)
+    blob = _patch_token(blob, WEBFLASH_HOST_TOKEN, server_host, 63)
+    blob = _patch_token(blob, WEBFLASH_PORT_TOKEN, str(server_port), 4)
+    return blob
 
 
 def _fit_frame(frame):
@@ -701,6 +752,84 @@ def api_flash_start():
     return jsonify({"ok": True, "message": "Flash job started"})
 
 
+@app.route("/api/webflash/prepare", methods=["POST"])
+def api_webflash_prepare():
+    if not _webflash_templates_exist():
+        return jsonify({"ok": False, "error": "Web flash templates are not available in this deployment"}), 501
+
+    payload = request.get_json(silent=True) or {}
+    flavor = str(payload.get("flavor", "no_audio")).strip()
+    ssid = str(payload.get("ssid", "")).strip()
+    password = str(payload.get("password", ""))
+    server_host = str(payload.get("server_host", "")).strip()
+    try:
+        server_port = int(payload.get("server_port", 8124))
+    except Exception:
+        return jsonify({"ok": False, "error": "server_port must be an integer"}), 400
+
+    if flavor not in ("audio_on", "no_audio"):
+        return jsonify({"ok": False, "error": "flavor must be audio_on or no_audio"}), 400
+    if not ssid:
+        return jsonify({"ok": False, "error": "SSID is required"}), 400
+    if not server_host:
+        return jsonify({"ok": False, "error": "Server host is required"}), 400
+    if server_port < 1 or server_port > 65535:
+        return jsonify({"ok": False, "error": "Server port must be 1-65535"}), 400
+
+    try:
+        firmware = _build_custom_webflash_firmware(flavor, ssid, password, server_host, server_port)
+    except Exception as ex:
+        return jsonify({"ok": False, "error": f"Failed to build custom firmware: {ex}"}), 500
+
+    payload_id = secrets.token_hex(12)
+    _cleanup_webflash_payloads()
+    with webflash_lock:
+        webflash_payloads[payload_id] = {
+            "created_ms": _now_ms(),
+            "flavor": flavor,
+            "firmware": firmware,
+        }
+    return jsonify({
+        "ok": True,
+        "manifest_url": f"/api/webflash/manifest/{payload_id}.json",
+        "expires_minutes": 30,
+    })
+
+
+@app.route("/api/webflash/manifest/<payload_id>.json", methods=["GET"])
+def api_webflash_manifest(payload_id):
+    with webflash_lock:
+        entry = webflash_payloads.get(payload_id)
+    if not entry:
+        return jsonify({"ok": False, "error": "Manifest not found or expired"}), 404
+
+    flavor = entry["flavor"]
+    suffix = "no-audio" if flavor == "no_audio" else "audio"
+    manifest = {
+        "name": "ESP32 TV CYD Custom",
+        "version": "1.0.0",
+        "new_install_prompt_erase": True,
+        "builds": [{
+            "chipFamily": "ESP32",
+            "parts": [
+                {"path": f"/static/firmware/bootloader-{suffix}.bin", "offset": 4096},
+                {"path": f"/static/firmware/partitions-{suffix}.bin", "offset": 32768},
+                {"path": f"/api/webflash/bin/{payload_id}.bin", "offset": 65536},
+            ],
+        }],
+    }
+    return jsonify(manifest)
+
+
+@app.route("/api/webflash/bin/<payload_id>.bin", methods=["GET"])
+def api_webflash_bin(payload_id):
+    with webflash_lock:
+        entry = webflash_payloads.get(payload_id)
+    if not entry:
+        return Response("Not found", status=404, mimetype="text/plain")
+    return Response(entry["firmware"], mimetype="application/octet-stream")
+
+
 @app.route("/admin")
 def admin_ui():
     return render_template_string(
@@ -985,16 +1114,37 @@ def admin_ui():
         <p style="margin: 0 0 8px; color: var(--muted);">
           Use Chrome/Edge on the device physically connected to CYD via USB.
         </p>
+        <div class="firm-grid">
+          <div class="row">
+            <label for="webflash_ssid">Wi-Fi SSID</label>
+            <input id="webflash_ssid" type="text" placeholder="Your Wi-Fi name" />
+          </div>
+          <div class="row">
+            <label for="webflash_password">Wi-Fi Password</label>
+            <input id="webflash_password" type="text" placeholder="Your Wi-Fi password" />
+          </div>
+          <div class="row">
+            <label for="webflash_server_host">Server Host/IP</label>
+            <input id="webflash_server_host" type="text" placeholder="192.168.1.72" />
+          </div>
+          <div class="row">
+            <label for="webflash_server_port">Server Port</label>
+            <input id="webflash_server_port" type="number" min="1" max="65535" step="1" value="8124" />
+          </div>
+        </div>
         <div class="actions">
           <div>
             <div style="font-size: 12px; color: var(--muted); margin-bottom: 4px;">Audio On</div>
-            <esp-web-install-button manifest="/static/firmware/manifest-audio.json"></esp-web-install-button>
+            <button class="secondary" id="webflash_prepare_audio_btn">Prepare + Flash</button>
+            <div id="webflash_audio_slot"></div>
           </div>
           <div>
             <div style="font-size: 12px; color: var(--muted); margin-bottom: 4px;">Audio Off (Higher FPS)</div>
-            <esp-web-install-button manifest="/static/firmware/manifest-no-audio.json"></esp-web-install-button>
+            <button class="secondary" id="webflash_prepare_no_audio_btn">Prepare + Flash</button>
+            <div id="webflash_no_audio_slot"></div>
           </div>
         </div>
+        <div id="webflash_status" class="status" style="margin-top: 10px;">Ready</div>
       </div>
     </section>
   </div>
@@ -1018,9 +1168,16 @@ def admin_ui():
     const flashStatusBox = document.getElementById("flash_status_box");
     const flashLog = document.getElementById("flash_log");
     const flashPorts = document.getElementById("flash_ports");
+    const webflashStatus = document.getElementById("webflash_status");
+    const webflashAudioSlot = document.getElementById("webflash_audio_slot");
+    const webflashNoAudioSlot = document.getElementById("webflash_no_audio_slot");
     function setFlashStatus(msg, mode) {
       flashStatusBox.textContent = msg;
       flashStatusBox.className = "status " + (mode || "");
+    }
+    function setWebflashStatus(msg, mode) {
+      webflashStatus.textContent = msg;
+      webflashStatus.className = "status " + (mode || "");
     }
 
     let isDirty = false;
@@ -1240,6 +1397,39 @@ def admin_ui():
       const m = url.match(/@([^:/]+)(?::\\d+)?\\//);
       document.getElementById("fw_server_host").value = (m && m[1]) ? m[1] : "192.168.1.72";
       document.getElementById("fw_server_port").value = 8124;
+      document.getElementById("webflash_server_host").value = document.getElementById("fw_server_host").value;
+      document.getElementById("webflash_server_port").value = document.getElementById("fw_server_port").value;
+    }
+
+    function mountWebflashButton(slotEl, manifestUrl) {
+      slotEl.innerHTML = "";
+      const btn = document.createElement("esp-web-install-button");
+      btn.setAttribute("manifest", manifestUrl);
+      slotEl.appendChild(btn);
+    }
+
+    async function prepareWebflash(flavor) {
+      const payload = {
+        flavor,
+        ssid: document.getElementById("webflash_ssid").value.trim(),
+        password: document.getElementById("webflash_password").value,
+        server_host: document.getElementById("webflash_server_host").value.trim(),
+        server_port: Number(document.getElementById("webflash_server_port").value)
+      };
+      setWebflashStatus("Preparing custom firmware...", "warn");
+      const res = await fetch("/api/webflash/prepare", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        setWebflashStatus(data.error || "Failed to prepare browser flash package", "err");
+        return;
+      }
+      const slot = flavor === "audio_on" ? webflashAudioSlot : webflashNoAudioSlot;
+      mountWebflashButton(slot, data.manifest_url);
+      setWebflashStatus("Ready. Click Install to choose USB port and flash.", "ok");
     }
 
     async function loadFlashStatus() {
@@ -1289,6 +1479,8 @@ def admin_ui():
 
     document.getElementById("flash_btn").addEventListener("click", startFlash);
     document.getElementById("refresh_flash_btn").addEventListener("click", loadFlashStatus);
+    document.getElementById("webflash_prepare_audio_btn").addEventListener("click", () => prepareWebflash("audio_on").catch(() => setWebflashStatus("Failed to prepare web flash", "err")));
+    document.getElementById("webflash_prepare_no_audio_btn").addEventListener("click", () => prepareWebflash("no_audio").catch(() => setWebflashStatus("Failed to prepare web flash", "err")));
 
     loadSettings().catch(() => setStatus("Failed to load settings", "err"));
     populateFirmwareDefaultsFromSettings();

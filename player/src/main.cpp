@@ -19,7 +19,7 @@
 #include "SDCard.h"
 #include "PowerUtils.h"
 #include "Button.h"
-#if __has_include("LocalOverrides.h")
+#if !defined(IGNORE_LOCAL_OVERRIDES) && __has_include("LocalOverrides.h")
 #include "LocalOverrides.h"
 #endif
 
@@ -39,16 +39,20 @@
 #define VIDEO_SERVER_PORT 8123
 #endif
 
+#define STRINGIFY_INNER(x) #x
+#define STRINGIFY(x) STRINGIFY_INNER(x)
+
+#ifndef VIDEO_SERVER_PORT_STR
+#define VIDEO_SERVER_PORT_STR STRINGIFY(VIDEO_SERVER_PORT)
+#endif
+
 #ifdef DISABLE_AUDIO
 #warning "Audio disabled for higher frame rate"
 #endif
 
-#define STRINGIFY_INNER(x) #x
-#define STRINGIFY(x) STRINGIFY_INNER(x)
-
-const char *FRAME_URL = "http://" VIDEO_SERVER_HOST ":" STRINGIFY(VIDEO_SERVER_PORT) "/frame";
-const char *AUDIO_URL = "http://" VIDEO_SERVER_HOST ":" STRINGIFY(VIDEO_SERVER_PORT) "/audio";
-const char *CHANNEL_INFO_URL = "http://" VIDEO_SERVER_HOST ":" STRINGIFY(VIDEO_SERVER_PORT) "/channel_info";
+char FRAME_URL[128] = {0};
+char AUDIO_URL[128] = {0};
+char CHANNEL_INFO_URL[128] = {0};
 
 #ifdef HAS_IR_REMOTE
 RemoteInput *remoteInput = NULL;
@@ -139,6 +143,14 @@ void setup()
   Serial.println("");
   // disable WiFi power saving for speed
   Serial.println("WiFi connected");
+  int videoServerPort = atoi(VIDEO_SERVER_PORT_STR);
+  if (videoServerPort <= 0 || videoServerPort > 65535) {
+    videoServerPort = VIDEO_SERVER_PORT;
+  }
+  snprintf(FRAME_URL, sizeof(FRAME_URL), "http://%s:%d/frame", VIDEO_SERVER_HOST, videoServerPort);
+  snprintf(AUDIO_URL, sizeof(AUDIO_URL), "http://%s:%d/audio", VIDEO_SERVER_HOST, videoServerPort);
+  snprintf(CHANNEL_INFO_URL, sizeof(CHANNEL_INFO_URL), "http://%s:%d/channel_info", VIDEO_SERVER_HOST, videoServerPort);
+  Serial.printf("Using video server: %s:%d\n", VIDEO_SERVER_HOST, videoServerPort);
   channelData = new NetworkChannelData(CHANNEL_INFO_URL, FRAME_URL, AUDIO_URL);
   videoSource = new NetworkVideoSource((NetworkChannelData *) channelData);
 #ifndef DISABLE_AUDIO
