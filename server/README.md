@@ -58,6 +58,12 @@ Optional restart loop:
 
 # Docker
 
+Prebuilt image (from GitHub Container Registry):
+
+```bash
+docker pull ghcr.io/drhammadkhan/esp32-tv-cyd-rtsp-server:latest
+```
+
 Build image:
 
 ```bash
@@ -105,3 +111,13 @@ Optional compose setup:
 cd server
 docker compose up -d --build
 ```
+
+## GitHub Container Publishing
+
+This repo includes a workflow that publishes the server image to GHCR on pushes to `main`:
+
+- `.github/workflows/publish_server_container.yml`
+
+Published image name:
+
+- `ghcr.io/drhammadkhan/esp32-tv-cyd-rtsp-server`
