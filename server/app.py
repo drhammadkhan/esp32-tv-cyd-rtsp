@@ -6,6 +6,7 @@ import json
 import secrets
 import tempfile
 import hashlib
+import wave
 from pathlib import Path
 
 import cv2
@@ -60,6 +61,10 @@ settings = {
     "brightness": int(os.getenv("BRIGHTNESS", "-4")),
     "saturation": float(os.getenv("SATURATION", "1.18")),
     "preset": os.getenv("STREAM_PRESET", "balanced"),
+    "motion_enabled": os.getenv("MOTION_ENABLED", "1") == "1",
+    "motion_threshold": float(os.getenv("MOTION_THRESHOLD", "2.5")),
+    "motion_hold_ms": int(os.getenv("MOTION_HOLD_MS", "4000")),
+    "motion_audio_enabled": os.getenv("MOTION_AUDIO_ENABLED", "1") == "1",
 }
 if settings["rtsp_url"]:
     settings["streams"] = [{"name": "Stream 1", "url": settings["rtsp_url"]}]
@@ -79,11 +84,27 @@ client_sessions = {}
 video_data = []
 stream_workers_lock = threading.Lock()
 stream_workers = {}
+motion_state_lock = threading.Lock()
+motion_state = {
+    "active": False,
+    "last_motion_ms": 0,
+    "last_motion_ratio": 0.0,
+    "triggered_until_ms": 0,
+    "source_stream_idx": 0,
+}
+motion_audio_lock = threading.Lock()
+motion_audio_cache = {
+    "path": "",
+    "mtime_ms": 0,
+    "data": b"",
+}
 
 PLAYER_DIR = (REPO_ROOT / "player").resolve()
 LOCAL_OVERRIDES_PATH = PLAYER_DIR / "src" / "LocalOverrides.h"
 SETTINGS_PATH = (Path(__file__).resolve().parent / "cache" / "settings.json").resolve()
 STATIC_FIRMWARE_DIR = (Path(__file__).resolve().parent / "static" / "firmware").resolve()
+MOTION_ALERT_WAV_PATH = (Path(__file__).resolve().parent / "cache" / "motion_alert.wav").resolve()
+MOTION_ALERT_RAW_PATH = (Path(__file__).resolve().parent / "cache" / "motion_alert_u8_16k.raw").resolve()
 
 WEBFLASH_SSID_TOKEN = b"CFG_WIFI_SSID_PLACEHOLDER_XXXXXXXXXXXXXXXX"
 WEBFLASH_PASSWORD_TOKEN = b"CFG_WIFI_PASSWORD_PLACEHOLDER_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
@@ -278,6 +299,20 @@ def _load_settings():
                 pass
         if "preset" in loaded:
             settings["preset"] = str(loaded["preset"])
+        if "motion_enabled" in loaded:
+            settings["motion_enabled"] = bool(loaded["motion_enabled"])
+        if "motion_threshold" in loaded:
+            try:
+                settings["motion_threshold"] = float(loaded["motion_threshold"])
+            except Exception:
+                pass
+        if "motion_hold_ms" in loaded:
+            try:
+                settings["motion_hold_ms"] = int(loaded["motion_hold_ms"])
+            except Exception:
+                pass
+        if "motion_audio_enabled" in loaded:
+            settings["motion_audio_enabled"] = bool(loaded["motion_audio_enabled"])
         if len(settings.get("streams", [])) == 0 and settings["rtsp_url"]:
             settings["streams"] = [{"name": "Stream 1", "url": settings["rtsp_url"]}]
             settings["active_stream_index"] = 0
@@ -492,6 +527,76 @@ def _encode_black_frame():
     return buf.tobytes() if ok else b""
 
 
+def _set_motion_trigger(stream_idx: int, ratio: float, hold_ms: int):
+    now = _now_ms()
+    with motion_state_lock:
+        motion_state["active"] = True
+        motion_state["last_motion_ms"] = now
+        motion_state["last_motion_ratio"] = float(ratio)
+        motion_state["triggered_until_ms"] = max(now + int(hold_ms), int(motion_state.get("triggered_until_ms", 0)))
+        motion_state["source_stream_idx"] = int(stream_idx)
+
+
+def _is_motion_active_for_stream(stream_idx: int):
+    now = _now_ms()
+    with motion_state_lock:
+        if now >= int(motion_state.get("triggered_until_ms", 0)):
+            motion_state["active"] = False
+            return False
+        return motion_state.get("active", False) and int(motion_state.get("source_stream_idx", 0)) == int(stream_idx)
+
+
+def _decode_wav_to_u8_16k(path: Path) -> bytes:
+    with wave.open(str(path), "rb") as wf:
+        channels = wf.getnchannels()
+        sample_width = wf.getsampwidth()
+        in_rate = wf.getframerate()
+        nframes = wf.getnframes()
+        raw = wf.readframes(nframes)
+    if sample_width not in (1, 2):
+        raise ValueError("motion alert wav must be 8-bit or 16-bit PCM")
+    if sample_width == 1:
+        pcm = np.frombuffer(raw, dtype=np.uint8).astype(np.float32) - 128.0
+    else:
+        pcm = np.frombuffer(raw, dtype=np.int16).astype(np.float32)
+    if channels > 1:
+        pcm = pcm.reshape(-1, channels).mean(axis=1)
+    if in_rate != 16000 and len(pcm) > 1:
+        x_in = np.linspace(0.0, 1.0, num=len(pcm), endpoint=False)
+        out_len = max(1, int(len(pcm) * (16000.0 / float(in_rate))))
+        x_out = np.linspace(0.0, 1.0, num=out_len, endpoint=False)
+        pcm = np.interp(x_out, x_in, pcm).astype(np.float32)
+    peak = float(np.max(np.abs(pcm))) if len(pcm) else 0.0
+    if peak > 0:
+        pcm = (pcm / peak) * 100.0
+    u8 = np.clip(pcm + 128.0, 0, 255).astype(np.uint8)
+    return u8.tobytes()
+
+
+def _get_motion_alert_audio():
+    candidate = None
+    if MOTION_ALERT_RAW_PATH.exists():
+        candidate = MOTION_ALERT_RAW_PATH
+    elif MOTION_ALERT_WAV_PATH.exists():
+        candidate = MOTION_ALERT_WAV_PATH
+    if candidate is None:
+        t = np.linspace(0, 0.15, int(16000 * 0.15), endpoint=False)
+        return (np.sin(2 * np.pi * 1200 * t) * 60 + 128).astype(np.uint8).tobytes()
+    mtime_ms = int(candidate.stat().st_mtime * 1000)
+    with motion_audio_lock:
+        if (
+            motion_audio_cache["path"] == str(candidate)
+            and motion_audio_cache["mtime_ms"] == mtime_ms
+            and motion_audio_cache["data"]
+        ):
+            return motion_audio_cache["data"]
+        data = _decode_wav_to_u8_16k(candidate) if candidate.suffix.lower() == ".wav" else candidate.read_bytes()
+        motion_audio_cache["path"] = str(candidate)
+        motion_audio_cache["mtime_ms"] = mtime_ms
+        motion_audio_cache["data"] = data
+        return data
+
+
 def _webflash_templates_exist(board: str):
     if board not in FLASH_TARGETS:
         return False
@@ -584,6 +689,7 @@ def _cleanup_stream_workers(keep_idx=None):
 
 
 def _stream_capture_worker(worker):
+    prev_gray = None
     while worker["running"]:
         url = worker["url"]
         if not url:
@@ -609,6 +715,16 @@ def _stream_capture_worker(worker):
                 break
             cfg = _get_settings()
             frame = _fit_frame(frame)
+            if cfg.get("motion_enabled", False):
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                if prev_gray is not None:
+                    diff = cv2.absdiff(gray, prev_gray)
+                    _, thresh = cv2.threshold(diff, 18, 255, cv2.THRESH_BINARY)
+                    motion_ratio = (float(np.count_nonzero(thresh)) * 100.0) / float(thresh.size)
+                    worker["motion_ratio"] = motion_ratio
+                    if motion_ratio >= float(cfg.get("motion_threshold", 2.5)):
+                        _set_motion_trigger(worker["idx"], motion_ratio, int(cfg.get("motion_hold_ms", 4000)))
+                prev_gray = gray
             preset = cfg.get("preset", "balanced")
             frame = _enhance_frame(frame, cfg["contrast"], cfg["brightness"], cfg["saturation"], preset)
             if cfg["swap_rb"]:
@@ -645,6 +761,7 @@ def _get_or_start_stream_worker(stream_idx: int, stream_url: str):
                 "last_error": "",
                 "last_frame_ms": 0,
                 "last_access_ms": _now_ms(),
+                "motion_ratio": 0.0,
             }
             stream_workers[stream_idx] = worker
             threading.Thread(target=_stream_capture_worker, args=(worker,), daemon=True).start()
@@ -762,10 +879,26 @@ def get_channel_lengths():
 def get_audio(channel_index, start, length):
     client_id = _get_request_client_id()
     if _is_rtsp_mode():
-        _set_active_stream_from_channel(channel_index, client_id)
+        idx = _set_active_stream_from_channel(channel_index, client_id)
         _cleanup_client_sessions(keep_client_id=client_id)
         if length <= 0:
             return Response(b'', mimetype='audio/x-raw')
+        cfg = _settings_for_response()
+        if cfg.get("motion_enabled", False) and cfg.get("motion_audio_enabled", True) and _is_motion_active_for_stream(idx):
+            alert = _get_motion_alert_audio()
+            if len(alert) > 0:
+                offset = max(0, int(start)) % len(alert)
+                if length <= len(alert) - offset:
+                    return Response(alert[offset:offset + length], mimetype='audio/x-raw')
+                out = bytearray()
+                remaining = int(length)
+                pos = offset
+                while remaining > 0:
+                    take = min(remaining, len(alert) - pos)
+                    out.extend(alert[pos:pos + take])
+                    remaining -= take
+                    pos = 0
+                return Response(bytes(out), mimetype='audio/x-raw')
         return Response(bytes([128]) * length, mimetype='audio/x-raw')
     _ensure_movies_loaded()
     audio, frames = video_data[channel_index % len(video_data)]
@@ -841,6 +974,14 @@ def api_get_settings():
         state["last_frame_ms"] = worker.get("last_frame_ms", state.get("last_frame_ms", 0))
         state["active_stream_index"] = idx
         state["active_stream_name"] = streams[idx]["name"]
+    with motion_state_lock:
+        motion_snapshot = dict(motion_state)
+    state["motion_active"] = bool(
+        motion_snapshot.get("active", False)
+        and _now_ms() < int(motion_snapshot.get("triggered_until_ms", 0))
+    )
+    state["motion_last_ms"] = int(motion_snapshot.get("last_motion_ms", 0))
+    state["motion_ratio"] = float(motion_snapshot.get("last_motion_ratio", 0.0))
     return jsonify({"settings": cfg, "state": state, "app_version": APP_VERSION})
 
 
@@ -905,6 +1046,26 @@ def api_set_settings():
             errors.append("preset must be max_fps, balanced, or best_quality")
         else:
             updates["preset"] = preset
+    if "motion_enabled" in payload:
+        updates["motion_enabled"] = bool(payload["motion_enabled"])
+    if "motion_threshold" in payload:
+        try:
+            motion_threshold = float(payload["motion_threshold"])
+            if motion_threshold < 0.1 or motion_threshold > 50.0:
+                raise ValueError
+            updates["motion_threshold"] = motion_threshold
+        except Exception:
+            errors.append("motion_threshold must be between 0.1 and 50.0")
+    if "motion_hold_ms" in payload:
+        try:
+            motion_hold_ms = int(payload["motion_hold_ms"])
+            if motion_hold_ms < 200 or motion_hold_ms > 60000:
+                raise ValueError
+            updates["motion_hold_ms"] = motion_hold_ms
+        except Exception:
+            errors.append("motion_hold_ms must be between 200 and 60000")
+    if "motion_audio_enabled" in payload:
+        updates["motion_audio_enabled"] = bool(payload["motion_audio_enabled"])
 
     if errors:
         return jsonify({"ok": False, "errors": errors}), 400
@@ -1312,6 +1473,23 @@ def admin_ui():
         <input id="swap_rb" type="checkbox" />
         <label for="swap_rb" style="margin:0">Swap Red/Blue Channels</label>
       </div>
+      <div class="row toggle">
+        <input id="motion_enabled" type="checkbox" />
+        <label for="motion_enabled" style="margin:0">Motion Detection Enabled</label>
+      </div>
+      <div class="row">
+        <label for="motion_threshold">Motion Threshold (%)</label>
+        <input id="motion_threshold" type="number" min="0.1" max="50" step="0.1" />
+      </div>
+      <div class="row">
+        <label for="motion_hold_ms">Motion Hold (ms)</label>
+        <input id="motion_hold_ms" type="number" min="200" max="60000" step="100" />
+      </div>
+      <div class="row toggle">
+        <input id="motion_audio_enabled" type="checkbox" />
+        <label for="motion_audio_enabled" style="margin:0">Play Alert Audio On Motion</label>
+      </div>
+      <p style="margin: 6px 0 0; font-size: 12px; color: var(--muted);">Optional alert files: `server/cache/motion_alert.wav` or `server/cache/motion_alert_u8_16k.raw`.</p>
 
       <div class="actions">
         <button class="primary" id="save_btn">Apply Settings</button>
@@ -1329,6 +1507,7 @@ def admin_ui():
         <div><strong>Active stream:</strong> <span id="meta_active_stream">-</span></div>
         <div><strong>Source:</strong> <span id="meta_source">-</span></div>
         <div><strong>Last frame:</strong> <span id="meta_frame">-</span></div>
+        <div><strong>Motion:</strong> <span id="meta_motion">-</span></div>
         <div><strong>Last error:</strong> <span id="meta_error">-</span></div>
       </div>
     </section>
@@ -1542,6 +1721,10 @@ def admin_ui():
       document.getElementById("saturation").value = s.saturation;
       document.getElementById("saturation_num").value = s.saturation;
       document.getElementById("swap_rb").checked = !!s.swap_rb;
+      document.getElementById("motion_enabled").checked = !!s.motion_enabled;
+      document.getElementById("motion_threshold").value = (s.motion_threshold ?? 2.5);
+      document.getElementById("motion_hold_ms").value = (s.motion_hold_ms ?? 4000);
+      document.getElementById("motion_audio_enabled").checked = (s.motion_audio_enabled ?? true);
       setStreams(s.streams || [], s.active_stream_index || 0);
     }
 
@@ -1551,6 +1734,11 @@ def admin_ui():
       document.getElementById("meta_source").textContent = st.source || "-";
       document.getElementById("meta_active_stream").textContent = st.active_stream_name || "-";
       document.getElementById("meta_error").textContent = st.last_error || "-";
+      if (st.motion_active) {
+        document.getElementById("meta_motion").textContent = `detected (${(st.motion_ratio || 0).toFixed(2)}%)`;
+      } else {
+        document.getElementById("meta_motion").textContent = "idle";
+      }
       if (st.last_frame_ms) {
         document.getElementById("meta_frame").textContent = new Date(st.last_frame_ms).toLocaleTimeString();
       } else {
@@ -1591,7 +1779,11 @@ def admin_ui():
         contrast: Number(document.getElementById("contrast_num").value),
         brightness: Number(document.getElementById("brightness_num").value),
         saturation: Number(document.getElementById("saturation_num").value),
-        swap_rb: document.getElementById("swap_rb").checked
+        swap_rb: document.getElementById("swap_rb").checked,
+        motion_enabled: document.getElementById("motion_enabled").checked,
+        motion_threshold: Number(document.getElementById("motion_threshold").value),
+        motion_hold_ms: Number(document.getElementById("motion_hold_ms").value),
+        motion_audio_enabled: document.getElementById("motion_audio_enabled").checked
       };
       const res = await fetch(withCid("/api/settings"), {
         method: "POST",
