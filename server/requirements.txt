@@ -4,3 +4,4 @@ soundfile
 scipy
 pillow
 tqdm
+esptool

@@ -4,6 +4,7 @@ import threading
 import time
 import json
 import secrets
+import tempfile
 from pathlib import Path
 
 import cv2
@@ -401,6 +402,25 @@ def _build_custom_webflash_firmware(flavor: str, ssid: str, password: str, serve
     blob = _patch_token(blob, WEBFLASH_PASSWORD_TOKEN, password, 63)
     blob = _patch_token(blob, WEBFLASH_HOST_TOKEN, server_host, 63)
     blob = _patch_token(blob, WEBFLASH_PORT_TOKEN, str(server_port), 4)
+    # Recalculate ESP image footer after binary patching.
+    try:
+        from esptool.bin_image import LoadFirmwareImage
+        image = LoadFirmwareImage("esp32", blob)
+        for i, segment in enumerate(image.segments):
+            if not hasattr(segment, "name"):
+                segment.name = f"segment{i}"
+        with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as tmp:
+            tmp_path = tmp.name
+        try:
+            image.save(tmp_path)
+            blob = Path(tmp_path).read_bytes()
+        finally:
+            try:
+                Path(tmp_path).unlink(missing_ok=True)
+            except OSError:
+                pass
+    except Exception as ex:
+        raise RuntimeError(f"failed to rebuild esp image footer: {ex}")
     return blob
 
 
