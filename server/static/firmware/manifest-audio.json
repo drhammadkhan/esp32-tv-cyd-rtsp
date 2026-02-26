@@ -1,0 +1,15 @@
+{
+  "name": "ESP32 TV CYD (Audio On)",
+  "version": "1.0.0",
+  "new_install_prompt_erase": true,
+  "builds": [
+    {
+      "chipFamily": "ESP32",
+      "parts": [
+        { "path": "/static/firmware/bootloader-audio.bin", "offset": 4096 },
+        { "path": "/static/firmware/partitions-audio.bin", "offset": 32768 },
+        { "path": "/static/firmware/firmware-audio.bin", "offset": 65536 }
+      ]
+    }
+  ]
+}

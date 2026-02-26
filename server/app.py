@@ -860,6 +860,7 @@ def admin_ui():
   </style>
 </head>
 <body>
+  <script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
   <div class="wrap">
     <section class="card">
       <h1>CYD Stream Control</h1>
@@ -974,6 +975,22 @@ def admin_ui():
       <div id="flash_status_box" class="status">Idle</div>
       <div id="flash_ports" class="meta"></div>
       <div id="flash_log" class="mono"></div>
+      <div class="row" style="margin-top: 16px;">
+        <label>Browser USB Flash (works with container deployments)</label>
+        <p style="margin: 0 0 8px; color: var(--muted);">
+          Use Chrome/Edge on the device physically connected to CYD via USB.
+        </p>
+        <div class="actions">
+          <div>
+            <div style="font-size: 12px; color: var(--muted); margin-bottom: 4px;">Audio On</div>
+            <esp-web-install-button manifest="/static/firmware/manifest-audio.json"></esp-web-install-button>
+          </div>
+          <div>
+            <div style="font-size: 12px; color: var(--muted); margin-bottom: 4px;">Audio Off (Higher FPS)</div>
+            <esp-web-install-button manifest="/static/firmware/manifest-no-audio.json"></esp-web-install-button>
+          </div>
+        </div>
+      </div>
     </section>
   </div>
 

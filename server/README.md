@@ -173,7 +173,8 @@ services:
 
 Notes:
 - Container deployment supports streaming/admin UI fully.
-- Firmware USB flashing from the web UI is disabled in container runtime (no local `player/` source tree by default). Use a local checkout for USB flashing.
+- Firmware USB flashing via backend `platformio` is disabled in container runtime (no local `player/` source tree by default).
+- Workaround included: use **Browser USB Flash** in `/admin` on a Chrome/Edge client that has the CYD connected over USB. This uses Web Serial from the browser and works with CasaOS/container deployments.
 
 ## CasaOS App Store Source (One-Click App Entry)
 

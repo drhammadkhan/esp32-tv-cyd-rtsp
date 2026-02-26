@@ -1,0 +1,15 @@
+{
+  "name": "ESP32 TV CYD (No Audio)",
+  "version": "1.0.0",
+  "new_install_prompt_erase": true,
+  "builds": [
+    {
+      "chipFamily": "ESP32",
+      "parts": [
+        { "path": "/static/firmware/bootloader-no-audio.bin", "offset": 4096 },
+        { "path": "/static/firmware/partitions-no-audio.bin", "offset": 32768 },
+        { "path": "/static/firmware/firmware-no-audio.bin", "offset": 65536 }
+      ]
+    }
+  ]
+}
