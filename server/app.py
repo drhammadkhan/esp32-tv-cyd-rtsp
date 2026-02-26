@@ -93,6 +93,7 @@ WEBFLASH_PORT_TOKEN = b"8124P"
 FLASH_TARGETS = {
     "cyd": {
         "label": "Cheap Yellow Display (ESP32-2432S028R)",
+        "chip": "esp32",
         "usb_env": {
             "audio_on": "cheap-yellow-display",
             "no_audio": "cheap-yellow-display-no-audio",
@@ -112,6 +113,7 @@ FLASH_TARGETS = {
     },
     "ttgo_tdisplay": {
         "label": "TTGO T-Display",
+        "chip": "esp32",
         "usb_env": {
             "audio_on": "tdisplay-wifi",
             "no_audio": "tdisplay-wifi-no-audio",
@@ -131,6 +133,7 @@ FLASH_TARGETS = {
     },
     "esp32_s3_2p8": {
         "label": "ESP32-S3 2.8\" 240x320",
+        "chip": "esp32s3",
         "usb_env": {
             "audio_on": "esp32-s3-2p8-wifi",
             "no_audio": "esp32-s3-2p8-wifi-no-audio",
@@ -518,6 +521,7 @@ def _patch_token(blob: bytes, token: bytes, value: str, max_len: int) -> bytes:
 
 def _build_custom_webflash_firmware(board: str, flavor: str, ssid: str, password: str, server_host: str, server_port: int) -> bytes:
     template_name = FLASH_TARGETS[board]["webflash"][flavor]["template"]
+    chip = str(FLASH_TARGETS.get(board, {}).get("chip", "esp32")).strip() or "esp32"
     blob = (STATIC_FIRMWARE_DIR / template_name).read_bytes()
     blob = _patch_token(blob, WEBFLASH_SSID_TOKEN, ssid, 32)
     blob = _patch_token(blob, WEBFLASH_PASSWORD_TOKEN, password, 63)
@@ -526,7 +530,7 @@ def _build_custom_webflash_firmware(board: str, flavor: str, ssid: str, password
     # Recalculate ESP image footer after binary patching.
     try:
         from esptool.bin_image import LoadFirmwareImage
-        image = LoadFirmwareImage("esp32", blob)
+        image = LoadFirmwareImage(chip, blob)
         for i, segment in enumerate(image.segments):
             if not hasattr(segment, "name"):
                 segment.name = f"segment{i}"
@@ -541,7 +545,7 @@ def _build_custom_webflash_firmware(board: str, flavor: str, ssid: str, password
             except OSError:
                 pass
     except Exception as ex:
-        raise RuntimeError(f"failed to rebuild esp image footer: {ex}")
+        raise RuntimeError(f"failed to rebuild esp image footer ({chip}): {ex}")
     return blob
 
 
