@@ -43,10 +43,12 @@ bool buttonDown(){
 }
 
 bool buttonPowerOff() {
+#ifdef ENABLE_BUTTON_POWER_OFF
 #ifdef BUTTON_L
   #ifdef BUTTON_R
     return (_btn_left == 0 && _btn_right == 0);
   #endif
+#endif
 #endif
   return false;
 }
@@ -79,5 +81,4 @@ void buttonLoop(){
     #endif
   }
 }
-
 
