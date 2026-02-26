@@ -626,7 +626,12 @@ def api_set_settings():
         _sync_rtsp_url_locked()
         applied = dict(settings)
     _set_active_stream_index(applied.get("active_stream_index", 0))
-    _persist_settings()
+    persist_warning = ""
+    try:
+        _persist_settings()
+    except Exception as ex:
+        persist_warning = f"Settings applied in memory, but failed to save to disk: {ex}"
+        print("warning:", persist_warning)
     # Allow live switching between movie mode and RTSP mode without restarting the server.
     now_rtsp_mode = len(applied.get("streams", [])) > 0
     if now_rtsp_mode and not running:
@@ -639,7 +644,7 @@ def api_set_settings():
         _set_capture_state(status="idle", source="", last_error="")
         if len(video_data) == 0:
             video_data = process_videos("movies", FRAME_SIZE)
-    return jsonify({"ok": True, "settings": applied})
+    return jsonify({"ok": True, "settings": applied, "warning": persist_warning})
 
 
 @app.route("/api/flash/status", methods=["GET"])
@@ -1146,7 +1151,11 @@ def admin_ui():
       }
       isDirty = false;
       hydrate({settings: data.settings, state: {}});
-      setStatus("Applied. Stream will reconnect if URL changed.", "ok");
+      if (data.warning) {
+        setStatus("Applied with warning: " + data.warning, "warn");
+      } else {
+        setStatus("Applied. Stream will reconnect if URL changed.", "ok");
+      }
       populateFirmwareDefaultsFromSettings();
     }
 
