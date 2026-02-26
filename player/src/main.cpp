@@ -104,6 +104,12 @@ void setup()
   Serial.printf("Free heap: %d\n", ESP.getFreeHeap());
   Serial.printf("Total PSRAM: %d\n", ESP.getPsramSize());
   Serial.printf("Free PSRAM: %d\n", ESP.getFreePsram());
+  #ifdef TFT_BL
+  if (TFT_BL != GPIO_NUM_NC) {
+    pinMode(TFT_BL, OUTPUT);
+    digitalWrite(TFT_BL, TFT_BACKLIGHT_ON);
+  }
+  #endif
   powerInit();
   buttonInit();
   if (display.hasTouch()) {
@@ -138,6 +144,9 @@ void setup()
   audioSource = new SDCardAudioSource((SDCardChannelData *) channelData);
   videoSource = new SDCardVideoSource((SDCardChannelData *) channelData);
   #else
+  snprintf(TUNING_SERVER_INFO, sizeof(TUNING_SERVER_INFO), "Booting...");
+  display.drawTuningText(TUNING_SERVER_INFO);
+  delay(200);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   while (WiFi.status() != WL_CONNECTED)
   {

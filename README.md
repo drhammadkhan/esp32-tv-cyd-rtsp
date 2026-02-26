@@ -73,3 +73,18 @@ Current CYD network defaults in firmware:
 - SSID: `YOUR_WIFI_SSID` (or set with web flasher)
 - Host: `192.168.1.100` (or set with web flasher)
 - Port: `8124`
+
+## ESP32-S3 ES3N28P (Spotpear) Notes
+
+For the Spotpear ESP32-S3 2.8" ILI9341V board (`ES3N28P`), these settings are now baked into `esp32-s3-2p8-wifi*`:
+
+- Driver: `ILI9341_DRIVER`
+- SPI pins: `SCLK=12`, `MISO=13`, `MOSI=11`
+- Control pins: `CS=10`, `DC=46`, `RST=-1`, `BL=45`
+- Backlight polarity: `TFT_BACKLIGHT_ON=HIGH`
+- SPI frequency: `20000000`
+- Custom ILI9341V init sequence applied at boot
+- Final orientation uses custom MADCTL for correct non-mirrored output
+
+Reference docs used for pin mapping:
+- https://spotpear.com/wiki/ESP32-2.8-inch-LCD-Display-TouchScreen-AI-DeepSeek.html#Utility%20Software

@@ -13,6 +13,8 @@ private:
   uint16_t *dmaBuffer[2] = {NULL, NULL};
   int dmaBufferIndex = 0;
   SemaphoreHandle_t mDisplayMutex = NULL;
+  bool mInitialized = false;
+  void ensureInit();
 public:
   TFT();
   void drawPixels(int x, int y, int width, int height, uint16_t *pixels);
