@@ -15,6 +15,7 @@ app = Flask(__name__)
 
 FRAME_SIZE = (320, 240)
 VIDEO_SERVER_PORT = int(os.getenv("VIDEO_SERVER_PORT", "8123"))
+APP_VERSION = os.getenv("APP_VERSION", "0f22f71")
 
 settings_lock = threading.Lock()
 settings = {
@@ -599,7 +600,7 @@ def api_get_settings():
         idx = _get_active_stream_index() % len(streams)
         state["active_stream_index"] = idx
         state["active_stream_name"] = streams[idx]["name"]
-    return jsonify({"settings": cfg, "state": state})
+    return jsonify({"settings": cfg, "state": state, "app_version": APP_VERSION})
 
 
 @app.route("/api/settings", methods=["POST"])
@@ -998,6 +999,7 @@ def admin_ui():
   <div class="wrap">
     <section class="card">
       <h1>CYD Stream Control</h1>
+      <div class="pill">Version {{ app_version }}</div>
       <p>Update URL and image tuning live. Changes are applied immediately.</p>
 
       <div class="row">
@@ -1496,7 +1498,8 @@ def admin_ui():
     }, 2000);
   </script>
 </body>
-</html>"""
+</html>""",
+        app_version=APP_VERSION
     )
 
 
