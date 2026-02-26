@@ -50,6 +50,11 @@ SATURATION=1.22 \
 ./venv/bin/python ./app.py
 ```
 
+The `/admin` UI now supports multiple saved RTSP streams. In RTSP mode:
+- each saved stream is exposed as a channel
+- CYD channel up/down (or touch swipe on CYD, right-to-left for next) switches streams
+- settings are persisted in `server/cache/settings.json`
+
 Optional restart loop:
 
 ```bash

@@ -2,6 +2,7 @@ import os
 import subprocess
 import threading
 import time
+import json
 from pathlib import Path
 
 import cv2
@@ -17,6 +18,8 @@ VIDEO_SERVER_PORT = int(os.getenv("VIDEO_SERVER_PORT", "8123"))
 settings_lock = threading.Lock()
 settings = {
     "rtsp_url": os.getenv("RTSP_URL", "").strip(),
+    "streams": [],
+    "active_stream_index": 0,
     "jpeg_quality": int(os.getenv("JPEG_QUALITY", "82")),
     "swap_rb": os.getenv("SWAP_RB", "0") == "1",
     "contrast": float(os.getenv("CONTRAST", "1.12")),
@@ -24,6 +27,9 @@ settings = {
     "saturation": float(os.getenv("SATURATION", "1.18")),
     "preset": os.getenv("STREAM_PRESET", "balanced"),
 }
+if settings["rtsp_url"]:
+    settings["streams"] = [{"name": "Stream 1", "url": settings["rtsp_url"]}]
+    settings["active_stream_index"] = 0
 
 capture_state_lock = threading.Lock()
 capture_state = {
@@ -33,6 +39,11 @@ capture_state = {
     "last_frame_ms": 0,
 }
 
+active_stream_lock = threading.Lock()
+active_stream_index = 0
+last_requested_channel_lock = threading.Lock()
+last_requested_channel_index = -1
+
 video_data = []
 latest_jpeg = None
 latest_lock = threading.Lock()
@@ -40,6 +51,7 @@ running = False
 
 PLAYER_DIR = (Path(__file__).resolve().parent.parent / "player").resolve()
 LOCAL_OVERRIDES_PATH = PLAYER_DIR / "src" / "LocalOverrides.h"
+SETTINGS_PATH = (Path(__file__).resolve().parent / "cache" / "settings.json").resolve()
 
 flash_lock = threading.Lock()
 flash_state = {
@@ -63,8 +75,155 @@ def _get_settings():
         return dict(settings)
 
 
+def _normalize_streams(raw_streams):
+    streams = []
+    if not isinstance(raw_streams, list):
+        return streams
+    for idx, item in enumerate(raw_streams):
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name", "")).strip()
+        url = str(item.get("url", "")).strip()
+        if not url:
+            continue
+        if not name:
+            name = f"Stream {len(streams) + 1}"
+        streams.append({"name": name[:64], "url": url[:2048]})
+        if len(streams) >= 16:
+            break
+    return streams
+
+
+def _sync_rtsp_url_locked():
+    streams = settings.get("streams", [])
+    idx = int(settings.get("active_stream_index", 0))
+    if len(streams) == 0:
+        settings["active_stream_index"] = 0
+        settings["rtsp_url"] = ""
+        return
+    if idx < 0 or idx >= len(streams):
+        idx = 0
+    settings["active_stream_index"] = idx
+    settings["rtsp_url"] = streams[idx]["url"]
+
+
+def _settings_for_response():
+    cfg = _get_settings()
+    streams = _normalize_streams(cfg.get("streams", []))
+    idx = int(cfg.get("active_stream_index", 0))
+    if len(streams) == 0 and cfg.get("rtsp_url", "").strip():
+        streams = [{"name": "Stream 1", "url": cfg["rtsp_url"].strip()}]
+        idx = 0
+    if len(streams) == 0:
+        idx = 0
+    elif idx < 0 or idx >= len(streams):
+        idx = 0
+    cfg["streams"] = streams
+    cfg["active_stream_index"] = idx
+    cfg["rtsp_url"] = streams[idx]["url"] if streams else ""
+    return cfg
+
+
+def _persist_settings():
+    data = _settings_for_response()
+    SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    SETTINGS_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+def _load_settings():
+    if not SETTINGS_PATH.exists():
+        return
+    try:
+        loaded = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+    except Exception as ex:
+        print(f"warning: failed to read settings file: {ex}")
+        return
+    with settings_lock:
+        if "streams" in loaded:
+            settings["streams"] = _normalize_streams(loaded.get("streams", []))
+        if "active_stream_index" in loaded:
+            try:
+                settings["active_stream_index"] = int(loaded.get("active_stream_index", 0))
+            except Exception:
+                settings["active_stream_index"] = 0
+        if "rtsp_url" in loaded:
+            settings["rtsp_url"] = str(loaded.get("rtsp_url", "")).strip()
+        if "jpeg_quality" in loaded:
+            try:
+                settings["jpeg_quality"] = int(loaded["jpeg_quality"])
+            except Exception:
+                pass
+        if "swap_rb" in loaded:
+            settings["swap_rb"] = bool(loaded["swap_rb"])
+        if "contrast" in loaded:
+            try:
+                settings["contrast"] = float(loaded["contrast"])
+            except Exception:
+                pass
+        if "brightness" in loaded:
+            try:
+                settings["brightness"] = int(loaded["brightness"])
+            except Exception:
+                pass
+        if "saturation" in loaded:
+            try:
+                settings["saturation"] = float(loaded["saturation"])
+            except Exception:
+                pass
+        if "preset" in loaded:
+            settings["preset"] = str(loaded["preset"])
+        if len(settings.get("streams", [])) == 0 and settings["rtsp_url"]:
+            settings["streams"] = [{"name": "Stream 1", "url": settings["rtsp_url"]}]
+            settings["active_stream_index"] = 0
+        _sync_rtsp_url_locked()
+
+
+def _get_active_stream_index():
+    with active_stream_lock:
+        return active_stream_index
+
+
+def _set_active_stream_index(idx):
+    global active_stream_index
+    with active_stream_lock:
+        active_stream_index = idx
+
+
+def _reset_last_requested_channel():
+    global last_requested_channel_index
+    with last_requested_channel_lock:
+        last_requested_channel_index = -1
+
+
+def _set_active_stream_from_channel(channel_index):
+    cfg = _settings_for_response()
+    streams = cfg.get("streams", [])
+    if len(streams) == 0:
+        _set_active_stream_index(0)
+        return 0
+    # Only switch stream when channel number changes; repeated /frame requests
+    # for the same channel should not fight manual selection in the web UI.
+    global last_requested_channel_index
+    with last_requested_channel_lock:
+        if channel_index == last_requested_channel_index:
+            return _get_active_stream_index() % len(streams)
+        last_requested_channel_index = channel_index
+    idx = channel_index % len(streams)
+    _set_active_stream_index(idx)
+    return idx
+
+
+def _get_active_stream_url():
+    cfg = _settings_for_response()
+    streams = cfg.get("streams", [])
+    if len(streams) == 0:
+        return "", 0
+    idx = _get_active_stream_index() % len(streams)
+    return streams[idx]["url"], idx
+
+
 def _is_rtsp_mode():
-    return len(_get_settings()["rtsp_url"]) > 0
+    return len(_settings_for_response().get("streams", [])) > 0
 
 
 def _set_capture_state(status=None, source=None, last_error=None):
@@ -232,8 +391,7 @@ def _enhance_frame(frame, contrast, brightness, saturation, preset):
 def _rtsp_capture_loop():
     global latest_jpeg
     while running:
-        cfg = _get_settings()
-        rtsp_url = cfg["rtsp_url"].strip()
+        rtsp_url, selected_index = _get_active_stream_url()
         if not rtsp_url:
             _set_capture_state(status="idle", source="", last_error="")
             with latest_lock:
@@ -250,8 +408,13 @@ def _rtsp_capture_loop():
         last_emit = 0.0
         while running:
             cfg = _get_settings()
-            if cfg["rtsp_url"].strip() != rtsp_url:
-                # URL changed in UI/API; reconnect with the new stream.
+            streams = _settings_for_response().get("streams", [])
+            if len(streams) == 0:
+                break
+            current_idx = _get_active_stream_index() % len(streams)
+            current_url = streams[current_idx]["url"]
+            if current_idx != selected_index or current_url != rtsp_url:
+                # Active stream changed in UI or by channel select; reconnect.
                 break
             ok, frame = cap.read()
             if not ok:
@@ -281,6 +444,9 @@ def _rtsp_capture_loop():
 
 def init_video_source():
     global video_data, latest_jpeg, running
+    _load_settings()
+    _set_active_stream_index(_settings_for_response().get("active_stream_index", 0))
+    _reset_last_requested_channel()
     if _is_rtsp_mode():
         latest_jpeg = _encode_black_frame()
         running = True
@@ -300,7 +466,10 @@ def _ensure_movies_loaded():
 @app.route('/channel_info')
 def get_channel_lengths():
     if _is_rtsp_mode():
-        return jsonify([2_147_483_647])
+        count = len(_settings_for_response().get("streams", []))
+        if count <= 0:
+            count = 1
+        return jsonify([2_147_483_647] * count)
     _ensure_movies_loaded()
     lengths = [len(audio) for audio, frames in video_data]
     return jsonify(lengths)
@@ -309,6 +478,7 @@ def get_channel_lengths():
 @app.route('/audio/<int:channel_index>/<int:start>/<int:length>')
 def get_audio(channel_index, start, length):
     if _is_rtsp_mode():
+        _set_active_stream_from_channel(channel_index)
         if length <= 0:
             return Response(b'', mimetype='audio/x-raw')
         return Response(bytes([128]) * length, mimetype='audio/x-raw')
@@ -329,6 +499,7 @@ def get_audio(channel_index, start, length):
 @app.route('/frame/<int:channel_index>/<int:ms>')
 def get_frame(channel_index, ms):
     if _is_rtsp_mode():
+        _set_active_stream_from_channel(channel_index)
         with latest_lock:
             data = latest_jpeg if latest_jpeg is not None else _encode_black_frame()
         return Response(data, mimetype='image/jpeg')
@@ -369,20 +540,36 @@ def preview_mjpg():
 
 @app.route("/api/settings", methods=["GET"])
 def api_get_settings():
-    cfg = _get_settings()
+    cfg = _settings_for_response()
     with capture_state_lock:
         state = dict(capture_state)
+    streams = cfg.get("streams", [])
+    if len(streams) > 0:
+        idx = _get_active_stream_index() % len(streams)
+        state["active_stream_index"] = idx
+        state["active_stream_name"] = streams[idx]["name"]
     return jsonify({"settings": cfg, "state": state})
 
 
 @app.route("/api/settings", methods=["POST"])
 def api_set_settings():
+    global running, latest_jpeg, video_data
     payload = request.get_json(silent=True) or {}
     errors = []
     updates = {}
 
     if "rtsp_url" in payload:
         updates["rtsp_url"] = str(payload["rtsp_url"]).strip()
+    if "streams" in payload:
+        streams = _normalize_streams(payload.get("streams", []))
+        updates["streams"] = streams
+        if len(streams) == 0:
+            updates["active_stream_index"] = 0
+    if "active_stream_index" in payload:
+        try:
+            updates["active_stream_index"] = int(payload["active_stream_index"])
+        except Exception:
+            errors.append("active_stream_index must be an integer")
     if "jpeg_quality" in payload:
         try:
             jpeg_quality = int(payload["jpeg_quality"])
@@ -429,7 +616,29 @@ def api_set_settings():
 
     with settings_lock:
         settings.update(updates)
+        if "rtsp_url" in updates and "streams" not in updates:
+            if updates["rtsp_url"]:
+                settings["streams"] = [{"name": "Stream 1", "url": updates["rtsp_url"]}]
+                settings["active_stream_index"] = 0
+            else:
+                settings["streams"] = []
+                settings["active_stream_index"] = 0
+        _sync_rtsp_url_locked()
         applied = dict(settings)
+    _set_active_stream_index(applied.get("active_stream_index", 0))
+    _persist_settings()
+    # Allow live switching between movie mode and RTSP mode without restarting the server.
+    now_rtsp_mode = len(applied.get("streams", [])) > 0
+    if now_rtsp_mode and not running:
+        latest_jpeg = _encode_black_frame()
+        running = True
+        threading.Thread(target=_rtsp_capture_loop, daemon=True).start()
+        _set_capture_state(status="starting", source="", last_error="")
+    elif (not now_rtsp_mode) and running:
+        running = False
+        _set_capture_state(status="idle", source="", last_error="")
+        if len(video_data) == 0:
+            video_data = process_videos("movies", FRAME_SIZE)
     return jsonify({"ok": True, "settings": applied})
 
 
@@ -631,6 +840,20 @@ def admin_ui():
       grid-template-columns: 1fr 1fr;
       gap: 10px;
     }
+    .stream-list {
+      display: grid;
+      gap: 8px;
+    }
+    .stream-row {
+      display: grid;
+      grid-template-columns: 0.8fr 1.8fr auto;
+      gap: 8px;
+      align-items: center;
+    }
+    .tiny {
+      padding: 8px 10px;
+      font-size: 12px;
+    }
     @media (max-width: 900px) {
       .firm-grid { grid-template-columns: 1fr; }
     }
@@ -645,6 +868,14 @@ def admin_ui():
       <div class="row">
         <label for="rtsp_url">RTSP URL</label>
         <input id="rtsp_url" type="text" placeholder="rtsp://user:pass@ip:port/path" />
+      </div>
+      <div class="row">
+        <label for="active_stream_index">Saved Streams</label>
+        <select id="active_stream_index"></select>
+      </div>
+      <div id="stream_list" class="stream-list"></div>
+      <div class="actions">
+        <button class="secondary" id="add_stream_btn">Add Stream</button>
       </div>
 
       <div class="row">
@@ -697,6 +928,7 @@ def admin_ui():
       <img class="preview" src="/preview.mjpg" alt="Live Preview" />
       <div class="meta">
         <div><strong>Status:</strong> <span id="meta_status">-</span></div>
+        <div><strong>Active stream:</strong> <span id="meta_active_stream">-</span></div>
         <div><strong>Source:</strong> <span id="meta_source">-</span></div>
         <div><strong>Last frame:</strong> <span id="meta_frame">-</span></div>
         <div><strong>Last error:</strong> <span id="meta_error">-</span></div>
@@ -770,6 +1002,58 @@ def admin_ui():
     }
 
     let isDirty = false;
+    const streamListEl = document.getElementById("stream_list");
+    const activeStreamEl = document.getElementById("active_stream_index");
+
+    function getStreamRows() {
+      const rows = [];
+      document.querySelectorAll(".stream-row").forEach((row) => {
+        const name = (row.querySelector(".stream-name").value || "").trim();
+        const url = (row.querySelector(".stream-url").value || "").trim();
+        if (url) {
+          rows.push({ name: name || `Stream ${rows.length + 1}`, url });
+        }
+      });
+      return rows;
+    }
+
+    function refreshActiveStreamOptions(selectedIndex) {
+      const streams = getStreamRows();
+      activeStreamEl.innerHTML = "";
+      streams.forEach((stream, i) => {
+        const opt = document.createElement("option");
+        opt.value = String(i);
+        opt.textContent = `${i + 1}. ${stream.name}`;
+        activeStreamEl.appendChild(opt);
+      });
+      if (streams.length > 0) {
+        const idx = Math.max(0, Math.min(Number(selectedIndex || 0), streams.length - 1));
+        activeStreamEl.value = String(idx);
+      }
+    }
+
+    function addStreamRow(stream, shouldRefresh) {
+      const row = document.createElement("div");
+      row.className = "stream-row";
+      row.innerHTML = `
+        <input class="stream-name" type="text" maxlength="64" placeholder="Name" value="${(stream.name || "").replace(/"/g, "&quot;")}" />
+        <input class="stream-url" type="text" placeholder="rtsp://..." value="${(stream.url || "").replace(/"/g, "&quot;")}" />
+        <button type="button" class="secondary tiny remove-stream-btn">Remove</button>
+      `;
+      streamListEl.appendChild(row);
+      if (shouldRefresh) {
+        refreshActiveStreamOptions(activeStreamEl.value || 0);
+      }
+    }
+
+    function setStreams(streams, activeIndex) {
+      streamListEl.innerHTML = "";
+      (streams || []).forEach((s) => addStreamRow(s, false));
+      if ((streams || []).length === 0) {
+        addStreamRow({ name: "Stream 1", url: "" }, false);
+      }
+      refreshActiveStreamOptions(activeIndex || 0);
+    }
 
     function applySettingsToForm(s) {
       document.getElementById("rtsp_url").value = s.rtsp_url || "";
@@ -782,12 +1066,14 @@ def admin_ui():
       document.getElementById("saturation").value = s.saturation;
       document.getElementById("saturation_num").value = s.saturation;
       document.getElementById("swap_rb").checked = !!s.swap_rb;
+      setStreams(s.streams || [], s.active_stream_index || 0);
     }
 
     function updateState(st) {
       st = st || {};
       document.getElementById("meta_status").textContent = st.status || "-";
       document.getElementById("meta_source").textContent = st.source || "-";
+      document.getElementById("meta_active_stream").textContent = st.active_stream_name || "-";
       document.getElementById("meta_error").textContent = st.last_error || "-";
       if (st.last_frame_ms) {
         document.getElementById("meta_frame").textContent = new Date(st.last_frame_ms).toLocaleTimeString();
@@ -809,12 +1095,22 @@ def admin_ui():
       const data = await res.json();
       isDirty = false;
       hydrate(data);
+      populateFirmwareDefaultsFromSettings();
       setStatus("Settings loaded", "ok");
     }
 
     async function saveSettings() {
+      const streams = getStreamRows();
+      let activeIndex = Number(activeStreamEl.value || 0);
+      if (streams.length === 0) {
+        activeIndex = 0;
+      } else if (activeIndex < 0 || activeIndex >= streams.length) {
+        activeIndex = 0;
+      }
       const payload = {
         rtsp_url: document.getElementById("rtsp_url").value.trim(),
+        streams,
+        active_stream_index: activeIndex,
         jpeg_quality: Number(document.getElementById("jpeg_quality_num").value),
         contrast: Number(document.getElementById("contrast_num").value),
         brightness: Number(document.getElementById("brightness_num").value),
@@ -834,6 +1130,7 @@ def admin_ui():
       isDirty = false;
       hydrate({settings: data.settings, state: {}});
       setStatus("Applied. Stream will reconnect if URL changed.", "ok");
+      populateFirmwareDefaultsFromSettings();
     }
 
     async function applyPreset(kind) {
@@ -862,8 +1159,53 @@ def admin_ui():
     document.getElementById("refresh_btn").addEventListener("click", loadSettings);
     document.getElementById("preset_fps_btn").addEventListener("click", () => applyPreset("max_fps"));
     document.getElementById("preset_quality_btn").addEventListener("click", () => applyPreset("best_quality"));
-    document.querySelectorAll("input").forEach((el) => {
-      el.addEventListener("input", () => { isDirty = true; });
+    document.getElementById("add_stream_btn").addEventListener("click", () => {
+      addStreamRow({ name: `Stream ${document.querySelectorAll(".stream-row").length + 1}`, url: "" }, true);
+      isDirty = true;
+    });
+    streamListEl.addEventListener("click", (e) => {
+      if (e.target && e.target.classList.contains("remove-stream-btn")) {
+        const row = e.target.closest(".stream-row");
+        if (row) {
+          row.remove();
+          refreshActiveStreamOptions(activeStreamEl.value || 0);
+          isDirty = true;
+        }
+      }
+    });
+    activeStreamEl.addEventListener("change", () => {
+      const streams = getStreamRows();
+      const idx = Number(activeStreamEl.value || 0);
+      if (streams[idx]) {
+        document.getElementById("rtsp_url").value = streams[idx].url;
+      }
+      isDirty = true;
+    });
+    document.getElementById("rtsp_url").addEventListener("input", () => {
+      const idx = Number(activeStreamEl.value || 0);
+      const rows = document.querySelectorAll(".stream-row");
+      if (rows[idx]) {
+        rows[idx].querySelector(".stream-url").value = document.getElementById("rtsp_url").value;
+      }
+      refreshActiveStreamOptions(idx);
+      isDirty = true;
+    });
+    document.addEventListener("input", (e) => {
+      if (!e.target) return;
+      if (e.target.classList && (e.target.classList.contains("stream-name") || e.target.classList.contains("stream-url"))) {
+        if (e.target.classList.contains("stream-url")) {
+          const rows = Array.from(document.querySelectorAll(".stream-row"));
+          const row = e.target.closest(".stream-row");
+          const idx = rows.indexOf(row);
+          if (idx === Number(activeStreamEl.value || 0)) {
+            document.getElementById("rtsp_url").value = e.target.value;
+          }
+        }
+        refreshActiveStreamOptions(activeStreamEl.value || 0);
+      }
+      isDirty = true;
+    });
+    document.querySelectorAll("input,select").forEach((el) => {
       el.addEventListener("change", () => { isDirty = true; });
     });
 

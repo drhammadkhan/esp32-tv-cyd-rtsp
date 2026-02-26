@@ -1,9 +1,12 @@
 #ifndef LED_MATRIX
 #include <Arduino.h>
 #include <TFT_eSPI.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "TFT.h"
 
 TFT::TFT(): tft(new TFT_eSPI()) {
+  mDisplayMutex = xSemaphoreCreateRecursiveMutex();
   // power on the tft
   #ifdef TFT_POWER
   if (TFT_POWER != GPIO_NUM_NC) {
@@ -51,11 +54,17 @@ void TFT::drawPixels(int x, int y, int width, int height, uint16_t *pixels) {
 }
 
 void TFT::startWrite() {
+  if (mDisplayMutex != NULL) {
+    xSemaphoreTakeRecursive(mDisplayMutex, portMAX_DELAY);
+  }
   tft->startWrite();
 }
 
 void TFT::endWrite() {
   tft->endWrite();
+  if (mDisplayMutex != NULL) {
+    xSemaphoreGiveRecursive(mDisplayMutex);
+  }
 }
 
 int TFT::width() {
@@ -67,33 +76,89 @@ int TFT::height() {
 }
 
 void TFT::fillScreen(uint16_t color) {
+  if (mDisplayMutex != NULL) {
+    xSemaphoreTakeRecursive(mDisplayMutex, portMAX_DELAY);
+  }
   tft->fillScreen(color);
+  if (mDisplayMutex != NULL) {
+    xSemaphoreGiveRecursive(mDisplayMutex);
+  }
 }
 
 void TFT::drawChannel(int channelIndex) {
+  if (mDisplayMutex != NULL) {
+    xSemaphoreTakeRecursive(mDisplayMutex, portMAX_DELAY);
+  }
   tft->setCursor(20, 20);
   tft->setTextColor(TFT_GREEN, TFT_BLACK);
   tft->printf("%d", channelIndex);
+  if (mDisplayMutex != NULL) {
+    xSemaphoreGiveRecursive(mDisplayMutex);
+  }
 }
 
 void TFT::drawTuningText() {
+  if (mDisplayMutex != NULL) {
+    xSemaphoreTakeRecursive(mDisplayMutex, portMAX_DELAY);
+  }
   tft->setCursor(20, 20);
   tft->setTextColor(TFT_GREEN, TFT_BLACK);
   tft->println("TUNING...");
+  if (mDisplayMutex != NULL) {
+    xSemaphoreGiveRecursive(mDisplayMutex);
+  }
 }
 
 void TFT::drawSDCardFailed() {
+  if (mDisplayMutex != NULL) {
+    xSemaphoreTakeRecursive(mDisplayMutex, portMAX_DELAY);
+  }
   tft->fillScreen(TFT_RED);
   tft->setCursor(0, 20);
   tft->setTextColor(TFT_WHITE);
   tft->setTextSize(2);
   tft->println("Failed to mount SD Card");
+  if (mDisplayMutex != NULL) {
+    xSemaphoreGiveRecursive(mDisplayMutex);
+  }
 }
 
 void TFT::drawFPS(int fps) {
+    if (mDisplayMutex != NULL) {
+      xSemaphoreTakeRecursive(mDisplayMutex, portMAX_DELAY);
+    }
     // show the frame rate in the top right
     tft->setCursor(width() - 50, 20);
     tft->setTextColor(TFT_GREEN, TFT_BLACK);
     tft->printf("%d", fps);
+    if (mDisplayMutex != NULL) {
+      xSemaphoreGiveRecursive(mDisplayMutex);
+    }
+}
+
+bool TFT::hasTouch() {
+#if defined(TOUCH_CS) && (TOUCH_CS != -1)
+  return true;
+#else
+  return false;
+#endif
+}
+
+bool TFT::getTouchPoint(uint16_t *x, uint16_t *y) {
+#if defined(TOUCH_CS) && (TOUCH_CS != -1)
+  if (mDisplayMutex == NULL) {
+    return tft->getTouch(x, y);
+  }
+  if (xSemaphoreTakeRecursive(mDisplayMutex, 0) != pdTRUE) {
+    return false;
+  }
+  bool pressed = tft->getTouch(x, y);
+  xSemaphoreGiveRecursive(mDisplayMutex);
+  return pressed;
+#else
+  (void)x;
+  (void)y;
+  return false;
+#endif
 }
 #endif

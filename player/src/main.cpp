@@ -19,8 +19,6 @@
 #include "SDCard.h"
 #include "PowerUtils.h"
 #include "Button.h"
-#include <Wire.h>
-#include "Touch/cst816T.h"
 #if __has_include("LocalOverrides.h")
 #include "LocalOverrides.h"
 #endif
@@ -75,8 +73,19 @@ Matrix display;
 TFT display;
 #endif
 
-TwoWire wire2(0);
-cst816t *touch;
+bool touchTracking = false;
+int16_t touchStartX = 0;
+int16_t touchStartY = 0;
+int16_t touchEndX = 0;
+int16_t touchEndY = 0;
+unsigned long lastSwipeMillis = 0;
+unsigned long lastTouchPollMillis = 0;
+bool lastChannelButtonPressed = false;
+unsigned long lastChannelButtonMillis = 0;
+bool channelButtonRawState = false;
+unsigned long channelButtonRawChangedMillis = 0;
+bool channelButtonLatched = false;
+unsigned long channelButtonReleaseStableMillis = 0;
 
 void setup()
 {
@@ -87,19 +96,12 @@ void setup()
   Serial.printf("Free PSRAM: %d\n", ESP.getFreePsram());
   powerInit();
   buttonInit();
-
-  // wire2.setPins(38, 48);
-  // touch = new cst816t(wire2, 43);
-  // touch->begin();
-  // xTaskCreate([](void *pvParameters) {
-  //   while (1)
-  //   {
-  //     if (touch->available()) {
-  //       Serial.printf("%d, %s\n", touch->gesture_id, touch->state().c_str());
-  //     }
-  //     vTaskDelay(100);
-  //   }
-  // }, "touch", 4096, NULL, 1, NULL);
+  if (display.hasTouch()) {
+    Serial.println("Touch input enabled");
+  }
+#ifdef CHANNEL_SWITCH_BUTTON
+  pinMode(CHANNEL_SWITCH_BUTTON, INPUT_PULLUP);
+#endif
   #ifdef USE_SDCARD
   Serial.println("Using SD Card");
   // power on the SD card
@@ -254,6 +256,87 @@ void channelUp() {
   Serial.printf("CHANNEL_UP %d\n", channel);
 }
 
+void handleTouchSwipe() {
+  if (!display.hasTouch()) {
+    return;
+  }
+  if (millis() - lastTouchPollMillis < 40) {
+    return;
+  }
+  lastTouchPollMillis = millis();
+  uint16_t x = 0;
+  uint16_t y = 0;
+  bool pressed = display.getTouchPoint(&x, &y);
+  if (pressed) {
+    if (!touchTracking) {
+      touchTracking = true;
+      touchStartX = x;
+      touchStartY = y;
+      touchEndX = x;
+      touchEndY = y;
+    } else {
+      touchEndX = x;
+      touchEndY = y;
+    }
+    return;
+  }
+  if (!touchTracking) {
+    return;
+  }
+  touchTracking = false;
+  int dx = touchEndX - touchStartX;
+  int dy = touchEndY - touchStartY;
+  int absDx = abs(dx);
+  int absDy = abs(dy);
+  if (absDx < 120 || absDx < (absDy + 30)) {
+    return;
+  }
+  if (millis() - lastSwipeMillis < 500) {
+    return;
+  }
+  lastSwipeMillis = millis();
+  if (dx < 0) {
+    Serial.println("SWIPE_RIGHT_TO_LEFT -> CHANNEL_UP");
+    channelUp();
+  }
+}
+
+void handleChannelSwitchButton() {
+#ifdef CHANNEL_SWITCH_BUTTON
+  unsigned long now = millis();
+  bool rawPressed = (digitalRead(CHANNEL_SWITCH_BUTTON) == LOW);
+
+  if (rawPressed != channelButtonRawState) {
+    channelButtonRawState = rawPressed;
+    channelButtonRawChangedMillis = now;
+  }
+
+  // Debounce raw input and only act on clean transitions.
+  if ((now - channelButtonRawChangedMillis) < 40) {
+    return;
+  }
+
+  bool pressed = channelButtonRawState;
+  if (!pressed) {
+    if (!lastChannelButtonPressed) {
+      channelButtonReleaseStableMillis = now;
+    }
+    // Rearm only after button has been released and stable for a bit.
+    if ((now - channelButtonReleaseStableMillis) > 180) {
+      channelButtonLatched = false;
+    }
+  }
+
+  if (pressed && !channelButtonLatched && (now - lastChannelButtonMillis) > 700) {
+    channelButtonLatched = true;
+    lastChannelButtonMillis = now;
+    Serial.printf("BOOT_BUTTON -> CHANNEL_UP %d -> %d\n", channel, (channel + 1) % channelData->getChannelCount());
+    channelUp();
+  }
+  lastChannelButtonPressed = pressed;
+#endif
+}
+
 void loop()
 {
 #ifdef HAS_IR_REMOTE
@@ -315,8 +398,10 @@ void loop()
     delay(500);
     powerDeepSeep();
   }
+  handleChannelSwitchButton();
   buttonLoop();
 #else
+    handleChannelSwitchButton();
     // important this needs to stay otherwise we are constantly polling the IR Remote
     // and there's no time for anything else to run.
     delay(200);
