@@ -91,6 +91,47 @@ WEBFLASH_PASSWORD_TOKEN = b"CFG_WIFI_PASSWORD_PLACEHOLDER_XXXXXXXXXXXXXXXXXXXXXX
 WEBFLASH_HOST_TOKEN = b"CFG_VIDEO_SERVER_HOST_PLACEHOLDER_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
 WEBFLASH_PORT_TOKEN = b"8124P"
 
+FLASH_TARGETS = {
+    "cyd": {
+        "label": "Cheap Yellow Display (ESP32-2432S028R)",
+        "usb_env": {
+            "audio_on": "cheap-yellow-display",
+            "no_audio": "cheap-yellow-display-no-audio",
+        },
+        "webflash": {
+            "audio_on": {
+                "bootloader": "bootloader-audio.bin",
+                "partitions": "partitions-audio.bin",
+                "template": "template-firmware-audio.bin",
+            },
+            "no_audio": {
+                "bootloader": "bootloader-no-audio.bin",
+                "partitions": "partitions-no-audio.bin",
+                "template": "template-firmware-no-audio.bin",
+            },
+        },
+    },
+    "ttgo_tdisplay": {
+        "label": "TTGO T-Display",
+        "usb_env": {
+            "audio_on": "tdisplay-wifi",
+            "no_audio": "tdisplay-wifi-no-audio",
+        },
+        "webflash": {
+            "audio_on": {
+                "bootloader": "tdisplay-bootloader-audio.bin",
+                "partitions": "tdisplay-partitions-audio.bin",
+                "template": "tdisplay-template-firmware-audio.bin",
+            },
+            "no_audio": {
+                "bootloader": "tdisplay-bootloader-no-audio.bin",
+                "partitions": "tdisplay-partitions-no-audio.bin",
+                "template": "tdisplay-template-firmware-no-audio.bin",
+            },
+        },
+    },
+}
+
 webflash_lock = threading.Lock()
 webflash_payloads = {}
 
@@ -314,7 +355,7 @@ def _run_flash_job(job):
         _append_flash_log("ERROR: firmware flashing is disabled in this deployment")
         return
 
-    env_name = "cheap-yellow-display-no-audio" if job["flavor"] == "no_audio" else "cheap-yellow-display"
+    env_name = FLASH_TARGETS[job["board"]]["usb_env"][job["flavor"]]
     cmd = ["python3", "-m", "platformio", "run", "-e", env_name, "-t", "upload"]
     if job.get("upload_port"):
         cmd.extend(["--upload-port", job["upload_port"]])
@@ -328,6 +369,7 @@ def _run_flash_job(job):
         flash_state["last_finished_ms"] = 0
         flash_state["log_lines"] = []
         flash_state["active_job"] = {
+            "board": job["board"],
             "flavor": job["flavor"],
             "ssid": job["ssid"],
             "server_host": job["server_host"],
@@ -391,15 +433,15 @@ def _encode_black_frame():
     return buf.tobytes() if ok else b""
 
 
-def _webflash_templates_exist():
-    required = [
-        STATIC_FIRMWARE_DIR / "bootloader-audio.bin",
-        STATIC_FIRMWARE_DIR / "partitions-audio.bin",
-        STATIC_FIRMWARE_DIR / "template-firmware-audio.bin",
-        STATIC_FIRMWARE_DIR / "bootloader-no-audio.bin",
-        STATIC_FIRMWARE_DIR / "partitions-no-audio.bin",
-        STATIC_FIRMWARE_DIR / "template-firmware-no-audio.bin",
-    ]
+def _webflash_templates_exist(board: str):
+    if board not in FLASH_TARGETS:
+        return False
+    required = []
+    for flavor in ("audio_on", "no_audio"):
+        cfg = FLASH_TARGETS[board]["webflash"][flavor]
+        required.append(STATIC_FIRMWARE_DIR / cfg["bootloader"])
+        required.append(STATIC_FIRMWARE_DIR / cfg["partitions"])
+        required.append(STATIC_FIRMWARE_DIR / cfg["template"])
     return all(p.exists() for p in required)
 
 
@@ -421,8 +463,8 @@ def _patch_token(blob: bytes, token: bytes, value: str, max_len: int) -> bytes:
     return blob.replace(token, replacement, 1)
 
 
-def _build_custom_webflash_firmware(flavor: str, ssid: str, password: str, server_host: str, server_port: int) -> bytes:
-    template_name = "template-firmware-no-audio.bin" if flavor == "no_audio" else "template-firmware-audio.bin"
+def _build_custom_webflash_firmware(board: str, flavor: str, ssid: str, password: str, server_host: str, server_port: int) -> bytes:
+    template_name = FLASH_TARGETS[board]["webflash"][flavor]["template"]
     blob = (STATIC_FIRMWARE_DIR / template_name).read_bytes()
     blob = _patch_token(blob, WEBFLASH_SSID_TOKEN, ssid, 32)
     blob = _patch_token(blob, WEBFLASH_PASSWORD_TOKEN, password, 63)
@@ -765,6 +807,7 @@ def api_flash_start():
         return jsonify({"ok": False, "error": "Firmware flasher disabled in this deployment. Use local checkout for USB flashing."}), 501
 
     payload = request.get_json(silent=True) or {}
+    board = str(payload.get("board", "cyd")).strip()
     flavor = str(payload.get("flavor", "audio_on")).strip()
     ssid = str(payload.get("ssid", "")).strip()
     password = str(payload.get("password", ""))
@@ -775,6 +818,8 @@ def api_flash_start():
     except Exception:
         return jsonify({"ok": False, "error": "server_port must be an integer"}), 400
 
+    if board not in FLASH_TARGETS:
+        return jsonify({"ok": False, "error": f"board must be one of: {', '.join(FLASH_TARGETS.keys())}"}), 400
     if flavor not in ("audio_on", "no_audio"):
         return jsonify({"ok": False, "error": "flavor must be audio_on or no_audio"}), 400
     if not ssid:
@@ -789,6 +834,7 @@ def api_flash_start():
             return jsonify({"ok": False, "error": "A flash job is already running"}), 409
 
     job = {
+        "board": board,
         "flavor": flavor,
         "ssid": ssid,
         "password": password,
@@ -802,10 +848,8 @@ def api_flash_start():
 
 @app.route("/api/webflash/prepare", methods=["POST"])
 def api_webflash_prepare():
-    if not _webflash_templates_exist():
-        return jsonify({"ok": False, "error": "Web flash templates are not available in this deployment"}), 501
-
     payload = request.get_json(silent=True) or {}
+    board = str(payload.get("board", "cyd")).strip()
     flavor = str(payload.get("flavor", "no_audio")).strip()
     ssid = str(payload.get("ssid", "")).strip()
     password = str(payload.get("password", ""))
@@ -815,6 +859,10 @@ def api_webflash_prepare():
     except Exception:
         return jsonify({"ok": False, "error": "server_port must be an integer"}), 400
 
+    if board not in FLASH_TARGETS:
+        return jsonify({"ok": False, "error": f"board must be one of: {', '.join(FLASH_TARGETS.keys())}"}), 400
+    if not _webflash_templates_exist(board):
+        return jsonify({"ok": False, "error": f"Web flash templates are not available for board '{board}' in this deployment"}), 501
     if flavor not in ("audio_on", "no_audio"):
         return jsonify({"ok": False, "error": "flavor must be audio_on or no_audio"}), 400
     if not ssid:
@@ -825,7 +873,7 @@ def api_webflash_prepare():
         return jsonify({"ok": False, "error": "Server port must be 1-65535"}), 400
 
     try:
-        firmware = _build_custom_webflash_firmware(flavor, ssid, password, server_host, server_port)
+        firmware = _build_custom_webflash_firmware(board, flavor, ssid, password, server_host, server_port)
     except Exception as ex:
         return jsonify({"ok": False, "error": f"Failed to build custom firmware: {ex}"}), 500
 
@@ -834,6 +882,7 @@ def api_webflash_prepare():
     with webflash_lock:
         webflash_payloads[payload_id] = {
             "created_ms": _now_ms(),
+            "board": board,
             "flavor": flavor,
             "firmware": firmware,
         }
@@ -852,16 +901,19 @@ def api_webflash_manifest(payload_id):
         return jsonify({"ok": False, "error": "Manifest not found or expired"}), 404
 
     flavor = entry["flavor"]
-    suffix = "no-audio" if flavor == "no_audio" else "audio"
+    board = entry.get("board", "cyd")
+    if board not in FLASH_TARGETS:
+        return jsonify({"ok": False, "error": "Manifest board is not supported"}), 400
+    wf = FLASH_TARGETS[board]["webflash"][flavor]
     manifest = {
-        "name": "ESP32 TV CYD Custom",
+        "name": f"ESP32 TV {FLASH_TARGETS[board]['label']} Custom",
         "version": "1.0.0",
         "new_install_prompt_erase": True,
         "builds": [{
             "chipFamily": "ESP32",
             "parts": [
-                {"path": f"/static/firmware/bootloader-{suffix}.bin", "offset": 4096},
-                {"path": f"/static/firmware/partitions-{suffix}.bin", "offset": 32768},
+                {"path": f"/static/firmware/{wf['bootloader']}", "offset": 4096},
+                {"path": f"/static/firmware/{wf['partitions']}", "offset": 32768},
                 {"path": f"/api/webflash/bin/{payload_id}.bin", "offset": 65536},
             ],
         }],
@@ -1121,8 +1173,15 @@ def admin_ui():
 
     <section class="card span-2">
       <div class="pill">Firmware Flasher</div>
-      <p>Build and flash CYD firmware directly from this server.</p>
+      <p>Build and flash firmware directly from this server.</p>
       <div class="firm-grid">
+        <div class="row">
+          <label for="fw_board">Board</label>
+          <select id="fw_board">
+            <option value="cyd">Cheap Yellow Display (ESP32-2432S028R)</option>
+            <option value="ttgo_tdisplay">TTGO T-Display</option>
+          </select>
+        </div>
         <div class="row">
           <label for="fw_flavor">Firmware Flavor</label>
           <select id="fw_flavor">
@@ -1152,7 +1211,7 @@ def admin_ui():
         </div>
       </div>
       <div class="actions">
-        <button class="primary" id="flash_btn">Build + Flash CYD</button>
+        <button class="primary" id="flash_btn">Build + Flash Device</button>
         <button class="secondary" id="refresh_flash_btn">Refresh Flash Status</button>
       </div>
       <div id="flash_status_box" class="status">Idle</div>
@@ -1164,6 +1223,13 @@ def admin_ui():
           Use Chrome/Edge on the device physically connected to CYD via USB.
         </p>
         <div class="firm-grid">
+          <div class="row">
+            <label for="webflash_board">Board</label>
+            <select id="webflash_board">
+              <option value="cyd">Cheap Yellow Display (ESP32-2432S028R)</option>
+              <option value="ttgo_tdisplay">TTGO T-Display</option>
+            </select>
+          </div>
           <div class="row">
             <label for="webflash_ssid">Wi-Fi SSID</label>
             <input id="webflash_ssid" type="text" placeholder="Your Wi-Fi name" />
@@ -1459,6 +1525,7 @@ def admin_ui():
 
     async function prepareWebflash(flavor) {
       const payload = {
+        board: document.getElementById("webflash_board").value,
         flavor,
         ssid: document.getElementById("webflash_ssid").value.trim(),
         password: document.getElementById("webflash_password").value,
@@ -1498,13 +1565,14 @@ def admin_ui():
       }
       document.getElementById("flash_btn").disabled = !supported || running;
       document.getElementById("refresh_flash_btn").disabled = false;
-      ["fw_flavor","fw_upload_port","fw_ssid","fw_password","fw_server_host","fw_server_port"].forEach((id) => {
+      ["fw_board","fw_flavor","fw_upload_port","fw_ssid","fw_password","fw_server_host","fw_server_port"].forEach((id) => {
         document.getElementById(id).disabled = !supported || running;
       });
     }
 
     async function startFlash() {
       const payload = {
+        board: document.getElementById("fw_board").value,
         flavor: document.getElementById("fw_flavor").value,
         ssid: document.getElementById("fw_ssid").value.trim(),
         password: document.getElementById("fw_password").value,
@@ -1528,6 +1596,12 @@ def admin_ui():
 
     document.getElementById("flash_btn").addEventListener("click", startFlash);
     document.getElementById("refresh_flash_btn").addEventListener("click", loadFlashStatus);
+    document.getElementById("fw_board").addEventListener("change", (e) => {
+      document.getElementById("webflash_board").value = e.target.value;
+    });
+    document.getElementById("webflash_board").addEventListener("change", (e) => {
+      document.getElementById("fw_board").value = e.target.value;
+    });
     document.getElementById("webflash_prepare_audio_btn").addEventListener("click", () => prepareWebflash("audio_on").catch(() => setWebflashStatus("Failed to prepare web flash", "err")));
     document.getElementById("webflash_prepare_no_audio_btn").addEventListener("click", () => prepareWebflash("no_audio").catch(() => setWebflashStatus("Failed to prepare web flash", "err")));
 
