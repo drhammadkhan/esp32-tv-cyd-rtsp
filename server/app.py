@@ -94,6 +94,7 @@ FLASH_TARGETS = {
     "cyd": {
         "label": "Cheap Yellow Display (ESP32-2432S028R)",
         "chip": "esp32",
+        "chip_family": "ESP32",
         "usb_env": {
             "audio_on": "cheap-yellow-display",
             "no_audio": "cheap-yellow-display-no-audio",
@@ -114,6 +115,7 @@ FLASH_TARGETS = {
     "ttgo_tdisplay": {
         "label": "TTGO T-Display",
         "chip": "esp32",
+        "chip_family": "ESP32",
         "usb_env": {
             "audio_on": "tdisplay-wifi",
             "no_audio": "tdisplay-wifi-no-audio",
@@ -134,6 +136,7 @@ FLASH_TARGETS = {
     "esp32_s3_2p8": {
         "label": "ESP32-S3 2.8\" 240x320",
         "chip": "esp32s3",
+        "chip_family": "ESP32-S3",
         "usb_env": {
             "audio_on": "esp32-s3-2p8-wifi",
             "no_audio": "esp32-s3-2p8-wifi-no-audio",
@@ -1062,13 +1065,14 @@ def api_webflash_manifest(payload_id):
     board = entry.get("board", "cyd")
     if board not in FLASH_TARGETS:
         return jsonify({"ok": False, "error": "Manifest board is not supported"}), 400
+    chip_family = str(FLASH_TARGETS[board].get("chip_family", "ESP32")).strip() or "ESP32"
     wf = FLASH_TARGETS[board]["webflash"][flavor]
     manifest = {
         "name": f"ESP32 TV {FLASH_TARGETS[board]['label']} Custom",
         "version": "1.0.0",
         "new_install_prompt_erase": True,
         "builds": [{
-            "chipFamily": "ESP32",
+            "chipFamily": chip_family,
             "parts": [
                 {"path": f"/static/firmware/{wf['bootloader']}", "offset": 4096},
                 {"path": f"/static/firmware/{wf['partitions']}", "offset": 32768},
