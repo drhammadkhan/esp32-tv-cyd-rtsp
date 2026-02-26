@@ -72,6 +72,38 @@ Optional restart loop:
 ./run_rtsp_server.sh
 ```
 
+## USB Flash Without Browser (Recommended if Web Flash crashes)
+
+Use the CLI flasher to avoid Chrome/Edge WebSerial entirely. It asks your running server to build the customized firmware, then flashes over USB with `esptool`.
+
+From repo root:
+
+```bash
+python3 server/tools/flash_from_server.py \
+  --server http://127.0.0.1:8124 \
+  --board esp32_s3_2p8 \
+  --flavor no_audio \
+  --ssid "Homelan" \
+  --password "your_wifi_password" \
+  --server-host 192.168.1.16 \
+  --server-port 8124 \
+  --port /dev/cu.usbmodem11101
+```
+
+Board values:
+- `cyd`
+- `ttgo_tdisplay`
+- `esp32_s3_2p8`
+
+Flavor values:
+- `audio_on`
+- `no_audio`
+
+Notes:
+- Add `--erase-first` if you want a full flash erase before writing.
+- If chip auto-detect fails, pass `--chip esp32` or `--chip esp32s3`.
+- Requires `esptool` (`pip install -r server/requirements.txt`).
+
 # Docker
 
 ## Quick Deploy (Prebuilt Image)
