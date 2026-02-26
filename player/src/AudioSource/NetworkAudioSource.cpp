@@ -22,7 +22,7 @@ int NetworkAudioSource::getAudioSamples(uint8_t **buffer, size_t &bufferSize, in
       *buffer = (uint8_t *)realloc(*buffer, SAMPLES_PER_CHUNK);
       bufferSize = SAMPLES_PER_CHUNK;
     }
-    std::string url = mChannelData->getAudioURL() + "/" + std::to_string(currentAudioSample) + "/" + std::to_string(bufferSize);
+    std::string url = mChannelData->getAudioURL() + "/" + std::to_string(currentAudioSample) + "/" + std::to_string(bufferSize) + mChannelData->getClientQuery();
     http.begin(url.c_str());
     int httpCode = http.GET();
     if (httpCode == HTTP_CODE_OK)

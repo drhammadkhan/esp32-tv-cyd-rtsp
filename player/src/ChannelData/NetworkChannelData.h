@@ -11,8 +11,9 @@ private:
   std::vector<int> mChannelLengths;
   std::string mFrameURL;
   std::string mAudioURL;
+  std::string mClientQuery;
 public:
-  NetworkChannelData(const char *channelInfoURL, const char *frameURL, const char *audioURL);
+  NetworkChannelData(const char *channelInfoURL, const char *frameURL, const char *audioURL, const char *clientQuery);
   bool fetchChannelData();
   int getChannelCount() {
     return mChannelLengths.size();
@@ -22,5 +23,6 @@ public:
   }
   std::string getFrameURL();
   std::string getAudioURL();
+  std::string getClientQuery();
   void setChannel(int channel);
 };

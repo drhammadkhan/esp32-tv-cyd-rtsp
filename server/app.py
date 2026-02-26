@@ -73,13 +73,12 @@ capture_state = {
     "last_frame_ms": 0,
 }
 
-active_stream_lock = threading.Lock()
-active_stream_index = 0
+client_sessions_lock = threading.Lock()
+client_sessions = {}
 
 video_data = []
-latest_jpeg = None
-latest_lock = threading.Lock()
-running = False
+stream_workers_lock = threading.Lock()
+stream_workers = {}
 
 PLAYER_DIR = (REPO_ROOT / "player").resolve()
 LOCAL_OVERRIDES_PATH = PLAYER_DIR / "src" / "LocalOverrides.h"
@@ -260,45 +259,80 @@ def _load_settings():
         _sync_rtsp_url_locked()
 
 
-def _get_active_stream_index():
-    with active_stream_lock:
-        return active_stream_index
+def _sanitize_client_id(raw_value):
+    raw = str(raw_value or "").strip()
+    if not raw:
+        return "default"
+    clean = "".join(ch for ch in raw if ch.isalnum() or ch in ("-", "_", ".", ":"))
+    return (clean[:64] or "default")
 
 
-def _set_active_stream_index(idx):
-    global active_stream_index
-    with active_stream_lock:
-        active_stream_index = idx
+def _get_request_client_id():
+    return _sanitize_client_id(
+        request.args.get("cid")
+        or request.args.get("client_id")
+        or request.headers.get("X-Client-Id", "")
+    )
 
 
-def _set_active_stream_from_channel(channel_index):
-    cfg = _settings_for_response()
-    streams = cfg.get("streams", [])
-    if len(streams) == 0:
-        _set_active_stream_index(0)
-        return 0
-    idx = channel_index % len(streams)
-    current = _get_active_stream_index() % len(streams)
-    if idx != current:
-        _set_active_stream_index(idx)
-        # Keep UI/settings aligned with physical channel selection from CYD.
-        with settings_lock:
-            settings["active_stream_index"] = idx
-            settings["rtsp_url"] = streams[idx]["url"]
-        try:
-            _persist_settings()
-        except Exception as ex:
-            print("warning: failed to persist stream selection:", ex)
+def _cleanup_client_sessions(keep_client_id=None):
+    now = _now_ms()
+    idle_ms = 1_800_000
+    with client_sessions_lock:
+        stale = []
+        for client_id, session in client_sessions.items():
+            if keep_client_id is not None and client_id == keep_client_id:
+                continue
+            if now - int(session.get("last_access_ms", 0)) > idle_ms:
+                stale.append(client_id)
+        for client_id in stale:
+            del client_sessions[client_id]
+
+
+def _get_client_active_stream_index(client_id, stream_count):
+    default_idx = int(_settings_for_response().get("active_stream_index", 0))
+    now = _now_ms()
+    with client_sessions_lock:
+        session = client_sessions.get(client_id)
+        if session is None:
+            session = {
+                "active_stream_index": default_idx,
+                "last_access_ms": now,
+            }
+            client_sessions[client_id] = session
+        idx = int(session.get("active_stream_index", default_idx))
+        if stream_count <= 0:
+            idx = 0
+        elif idx < 0 or idx >= stream_count:
+            idx = 0
+        session["active_stream_index"] = idx
+        session["last_access_ms"] = now
+        return idx
+
+
+def _set_client_active_stream_index(client_id, idx, stream_count):
+    now = _now_ms()
+    if stream_count <= 0:
+        idx = 0
+    elif idx < 0 or idx >= stream_count:
+        idx = 0
+    with client_sessions_lock:
+        client_sessions[client_id] = {
+            "active_stream_index": idx,
+            "last_access_ms": now,
+        }
     return idx
 
 
-def _get_active_stream_url():
+def _set_active_stream_from_channel(channel_index, client_id):
     cfg = _settings_for_response()
     streams = cfg.get("streams", [])
     if len(streams) == 0:
-        return "", 0
-    idx = _get_active_stream_index() % len(streams)
-    return streams[idx]["url"], idx
+        _set_client_active_stream_index(client_id, 0, 0)
+        return 0
+    idx = channel_index % len(streams)
+    _set_client_active_stream_index(client_id, idx, len(streams))
+    return idx
 
 
 def _is_rtsp_mode():
@@ -508,6 +542,90 @@ def _fit_frame(frame):
     return resized[y0:y0 + target_h, x0:x0 + target_w]
 
 
+def _cleanup_stream_workers(keep_idx=None):
+    now = _now_ms()
+    idle_ms = 120_000
+    with stream_workers_lock:
+        stale = []
+        for idx, worker in stream_workers.items():
+            if keep_idx is not None and idx == keep_idx:
+                continue
+            if now - int(worker.get("last_access_ms", 0)) > idle_ms:
+                stale.append(idx)
+        for idx in stale:
+            stream_workers[idx]["running"] = False
+            del stream_workers[idx]
+
+
+def _stream_capture_worker(worker):
+    while worker["running"]:
+        url = worker["url"]
+        if not url:
+            worker["status"] = "idle"
+            worker["last_error"] = ""
+            time.sleep(0.3)
+            continue
+        worker["status"] = "connecting"
+        worker["last_error"] = ""
+        cap = cv2.VideoCapture(url)
+        if not cap.isOpened():
+            worker["status"] = "error"
+            worker["last_error"] = "failed to open RTSP stream"
+            time.sleep(1.0)
+            continue
+        worker["status"] = "streaming"
+        last_emit = 0.0
+        while worker["running"]:
+            ok, frame = cap.read()
+            if not ok:
+                worker["status"] = "reconnecting"
+                worker["last_error"] = "stream read failed"
+                break
+            cfg = _get_settings()
+            frame = _fit_frame(frame)
+            preset = cfg.get("preset", "balanced")
+            frame = _enhance_frame(frame, cfg["contrast"], cfg["brightness"], cfg["saturation"], preset)
+            if cfg["swap_rb"]:
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), cfg["jpeg_quality"]])
+            if not ok:
+                continue
+            now = time.time()
+            target_fps = 12 if preset == "best_quality" else 0
+            if target_fps > 0 and last_emit > 0 and (now - last_emit) < (1.0 / target_fps):
+                continue
+            worker["latest_jpeg"] = buf.tobytes()
+            worker["last_frame_ms"] = _now_ms()
+            worker["status"] = "streaming"
+            last_emit = now
+        cap.release()
+        time.sleep(0.4)
+
+
+def _get_or_start_stream_worker(stream_idx: int, stream_url: str):
+    with stream_workers_lock:
+        worker = stream_workers.get(stream_idx)
+        if worker is not None and worker.get("url") != stream_url:
+            worker["running"] = False
+            del stream_workers[stream_idx]
+            worker = None
+        if worker is None:
+            worker = {
+                "idx": stream_idx,
+                "url": stream_url,
+                "running": True,
+                "latest_jpeg": _encode_black_frame(),
+                "status": "starting",
+                "last_error": "",
+                "last_frame_ms": 0,
+                "last_access_ms": _now_ms(),
+            }
+            stream_workers[stream_idx] = worker
+            threading.Thread(target=_stream_capture_worker, args=(worker,), daemon=True).start()
+        worker["last_access_ms"] = _now_ms()
+        return worker
+
+
 def _resize_jpeg_to(jpeg_bytes: bytes, size: tuple[int, int], quality: int = 80) -> bytes:
     arr = np.frombuffer(jpeg_bytes, dtype=np.uint8)
     img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
@@ -535,11 +653,17 @@ def _fit_frame_for_size(frame, target_size):
     return resized[y0:y0 + target_h, x0:x0 + target_w]
 
 
-def _get_frame_bytes(channel_index, ms):
+def _get_frame_bytes(channel_index, ms, client_id):
     if _is_rtsp_mode():
-        _set_active_stream_from_channel(channel_index)
-        with latest_lock:
-            return latest_jpeg if latest_jpeg is not None else _encode_black_frame()
+        cfg = _settings_for_response()
+        streams = cfg.get("streams", [])
+        if len(streams) == 0:
+            return _encode_black_frame()
+        idx = _set_active_stream_from_channel(channel_index, client_id)
+        worker = _get_or_start_stream_worker(idx, streams[idx]["url"])
+        _cleanup_stream_workers(keep_idx=idx)
+        _cleanup_client_sessions(keep_client_id=client_id)
+        return worker.get("latest_jpeg") or _encode_black_frame()
     _ensure_movies_loaded()
     audio, frames = video_data[channel_index % len(video_data)]
     # use binary search to find the closest frame
@@ -580,68 +704,10 @@ def _enhance_frame(frame, contrast, brightness, saturation, preset):
     return frame
 
 
-def _rtsp_capture_loop():
-    global latest_jpeg
-    while running:
-        rtsp_url, selected_index = _get_active_stream_url()
-        if not rtsp_url:
-            _set_capture_state(status="idle", source="", last_error="")
-            with latest_lock:
-                latest_jpeg = _encode_black_frame()
-            time.sleep(0.3)
-            continue
-        _set_capture_state(status="connecting", source=rtsp_url, last_error="")
-        cap = cv2.VideoCapture(rtsp_url)
-        if not cap.isOpened():
-            _set_capture_state(status="error", source=rtsp_url, last_error="failed to open RTSP stream")
-            time.sleep(1.0)
-            continue
-        _set_capture_state(status="streaming", source=rtsp_url, last_error="")
-        last_emit = 0.0
-        while running:
-            cfg = _get_settings()
-            streams = _settings_for_response().get("streams", [])
-            if len(streams) == 0:
-                break
-            current_idx = _get_active_stream_index() % len(streams)
-            current_url = streams[current_idx]["url"]
-            if current_idx != selected_index or current_url != rtsp_url:
-                # Active stream changed in UI or by channel select; reconnect.
-                break
-            ok, frame = cap.read()
-            if not ok:
-                _set_capture_state(status="reconnecting", source=rtsp_url, last_error="stream read failed")
-                break
-            frame = _fit_frame(frame)
-            preset = cfg.get("preset", "balanced")
-            frame = _enhance_frame(frame, cfg["contrast"], cfg["brightness"], cfg["saturation"], preset)
-            if cfg["swap_rb"]:
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), cfg["jpeg_quality"]])
-            if ok:
-                # Simple output FPS limiter for quality mode, gives CPU headroom to process better.
-                now = time.time()
-                target_fps = 12 if preset == "best_quality" else 0
-                if target_fps > 0 and last_emit > 0 and (now - last_emit) < (1.0 / target_fps):
-                    continue
-                with latest_lock:
-                    latest_jpeg = buf.tobytes()
-                last_emit = now
-                with capture_state_lock:
-                    capture_state["last_frame_ms"] = _now_ms()
-                    capture_state["status"] = "streaming"
-        cap.release()
-        time.sleep(0.5)
-
-
 def init_video_source():
-    global video_data, latest_jpeg, running
+    global video_data
     _load_settings()
-    _set_active_stream_index(_settings_for_response().get("active_stream_index", 0))
     if _is_rtsp_mode():
-        latest_jpeg = _encode_black_frame()
-        running = True
-        threading.Thread(target=_rtsp_capture_loop, daemon=True).start()
         print("RTSP mode enabled")
     else:
         video_data = process_videos("movies", FRAME_SIZE)
@@ -668,8 +734,10 @@ def get_channel_lengths():
 
 @app.route('/audio/<int:channel_index>/<int:start>/<int:length>')
 def get_audio(channel_index, start, length):
+    client_id = _get_request_client_id()
     if _is_rtsp_mode():
-        _set_active_stream_from_channel(channel_index)
+        _set_active_stream_from_channel(channel_index, client_id)
+        _cleanup_client_sessions(keep_client_id=client_id)
         if length <= 0:
             return Response(b'', mimetype='audio/x-raw')
         return Response(bytes([128]) * length, mimetype='audio/x-raw')
@@ -689,13 +757,15 @@ def get_audio(channel_index, start, length):
 
 @app.route('/frame/<int:channel_index>/<int:ms>')
 def get_frame(channel_index, ms):
-    data = _get_frame_bytes(channel_index, ms)
+    client_id = _get_request_client_id()
+    data = _get_frame_bytes(channel_index, ms, client_id)
     return Response(data, mimetype='image/jpeg')
 
 
 @app.route('/frame_tdisplay/<int:channel_index>/<int:ms>')
 def get_frame_tdisplay(channel_index, ms):
-    data = _get_frame_bytes(channel_index, ms)
+    client_id = _get_request_client_id()
+    data = _get_frame_bytes(channel_index, ms, client_id)
     # TTGO T-Display screen is 240x135; send matching stream dimensions.
     data = _resize_jpeg_to(data, (240, 135), quality=78)
     return Response(data, mimetype='image/jpeg')
@@ -703,11 +773,21 @@ def get_frame_tdisplay(channel_index, ms):
 
 @app.route("/preview.mjpg")
 def preview_mjpg():
+    client_id = _get_request_client_id()
+
     def _generate():
         boundary = b"--frame\r\n"
         while True:
-            with latest_lock:
-                frame = latest_jpeg if latest_jpeg is not None else _encode_black_frame()
+            cfg = _settings_for_response()
+            streams = cfg.get("streams", [])
+            if len(streams) > 0:
+                idx = _get_client_active_stream_index(client_id, len(streams))
+                worker = _get_or_start_stream_worker(idx, streams[idx]["url"])
+                _cleanup_stream_workers(keep_idx=idx)
+                _cleanup_client_sessions(keep_client_id=client_id)
+                frame = worker.get("latest_jpeg") or _encode_black_frame()
+            else:
+                frame = _encode_black_frame()
             yield boundary
             yield b"Content-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
             time.sleep(0.08)
@@ -717,14 +797,22 @@ def preview_mjpg():
 
 @app.route("/api/settings", methods=["GET"])
 def api_get_settings():
+    client_id = _get_request_client_id()
     cfg = _settings_for_response()
     with capture_state_lock:
         state = dict(capture_state)
     streams = cfg.get("streams", [])
     if len(streams) > 0:
-        idx = _get_active_stream_index() % len(streams)
+        idx = _get_client_active_stream_index(client_id, len(streams))
         cfg["active_stream_index"] = idx
         cfg["rtsp_url"] = streams[idx]["url"]
+        worker = _get_or_start_stream_worker(idx, streams[idx]["url"])
+        _cleanup_stream_workers(keep_idx=idx)
+        _cleanup_client_sessions(keep_client_id=client_id)
+        state["status"] = worker.get("status", state.get("status", "starting"))
+        state["source"] = worker.get("url", streams[idx]["url"])
+        state["last_error"] = worker.get("last_error", state.get("last_error", ""))
+        state["last_frame_ms"] = worker.get("last_frame_ms", state.get("last_frame_ms", 0))
         state["active_stream_index"] = idx
         state["active_stream_name"] = streams[idx]["name"]
     return jsonify({"settings": cfg, "state": state, "app_version": APP_VERSION})
@@ -732,10 +820,12 @@ def api_get_settings():
 
 @app.route("/api/settings", methods=["POST"])
 def api_set_settings():
-    global running, latest_jpeg, video_data
+    global video_data
+    client_id = _get_request_client_id()
     payload = request.get_json(silent=True) or {}
     errors = []
     updates = {}
+    requested_active_index = None
 
     if "rtsp_url" in payload:
         updates["rtsp_url"] = str(payload["rtsp_url"]).strip()
@@ -746,7 +836,7 @@ def api_set_settings():
             updates["active_stream_index"] = 0
     if "active_stream_index" in payload:
         try:
-            updates["active_stream_index"] = int(payload["active_stream_index"])
+            requested_active_index = int(payload["active_stream_index"])
         except Exception:
             errors.append("active_stream_index must be an integer")
     if "jpeg_quality" in payload:
@@ -804,7 +894,18 @@ def api_set_settings():
                 settings["active_stream_index"] = 0
         _sync_rtsp_url_locked()
         applied = dict(settings)
-    _set_active_stream_index(applied.get("active_stream_index", 0))
+    stream_count = len(applied.get("streams", []))
+    if requested_active_index is not None:
+        selected_idx = _set_client_active_stream_index(client_id, requested_active_index, stream_count)
+    else:
+        selected_idx = _get_client_active_stream_index(client_id, stream_count)
+    if stream_count > 0:
+        applied["active_stream_index"] = selected_idx
+        applied["rtsp_url"] = applied["streams"][selected_idx]["url"]
+    else:
+        applied["active_stream_index"] = 0
+        applied["rtsp_url"] = ""
+    _cleanup_client_sessions(keep_client_id=client_id)
     persist_warning = ""
     try:
         _persist_settings()
@@ -813,13 +914,9 @@ def api_set_settings():
         print("warning:", persist_warning)
     # Allow live switching between movie mode and RTSP mode without restarting the server.
     now_rtsp_mode = len(applied.get("streams", [])) > 0
-    if now_rtsp_mode and not running:
-        latest_jpeg = _encode_black_frame()
-        running = True
-        threading.Thread(target=_rtsp_capture_loop, daemon=True).start()
+    if now_rtsp_mode:
         _set_capture_state(status="starting", source="", last_error="")
-    elif (not now_rtsp_mode) and running:
-        running = False
+    else:
         _set_capture_state(status="idle", source="", last_error="")
         if len(video_data) == 0:
             video_data = process_videos("movies", FRAME_SIZE)
@@ -1199,7 +1296,7 @@ def admin_ui():
     </section>
 
     <section class="card">
-      <img class="preview" src="/preview.mjpg" alt="Live Preview" />
+      <img id="preview_img" class="preview" src="/preview.mjpg" alt="Live Preview" />
       <div class="meta">
         <div><strong>Status:</strong> <span id="meta_status">-</span></div>
         <div><strong>Active stream:</strong> <span id="meta_active_stream">-</span></div>
@@ -1303,6 +1400,24 @@ def admin_ui():
   </div>
 
   <script>
+    const CLIENT_ID_KEY = "esp32_tv_client_id";
+    function getClientId() {
+      let cid = localStorage.getItem(CLIENT_ID_KEY) || "";
+      if (!cid) {
+        if (window.crypto && window.crypto.randomUUID) {
+          cid = "web-" + window.crypto.randomUUID();
+        } else {
+          cid = "web-" + Math.random().toString(36).slice(2) + Date.now().toString(36);
+        }
+        localStorage.setItem(CLIENT_ID_KEY, cid);
+      }
+      return cid;
+    }
+    const clientId = getClientId();
+    function withCid(path) {
+      return path + (path.includes("?") ? "&" : "?") + "cid=" + encodeURIComponent(clientId);
+    }
+
     const ids = ["jpeg_quality", "contrast", "brightness", "saturation"];
     function bindPair(id) {
       const slider = document.getElementById(id);
@@ -1423,7 +1538,7 @@ def admin_ui():
     }
 
     async function loadSettings() {
-      const res = await fetch("/api/settings");
+      const res = await fetch(withCid("/api/settings"));
       const data = await res.json();
       isDirty = false;
       hydrate(data);
@@ -1449,7 +1564,7 @@ def admin_ui():
         saturation: Number(document.getElementById("saturation_num").value),
         swap_rb: document.getElementById("swap_rb").checked
       };
-      const res = await fetch("/api/settings", {
+      const res = await fetch(withCid("/api/settings"), {
         method: "POST",
         headers: {"Content-Type": "application/json"},
         body: JSON.stringify(payload)
@@ -1476,7 +1591,7 @@ def admin_ui():
       };
       const p = presets[kind];
       if (!p) return;
-      const res = await fetch("/api/settings", {
+      const res = await fetch(withCid("/api/settings"), {
         method: "POST",
         headers: {"Content-Type": "application/json"},
         body: JSON.stringify(p)
@@ -1643,11 +1758,12 @@ def admin_ui():
     document.getElementById("webflash_prepare_audio_btn").addEventListener("click", () => prepareWebflash("audio_on").catch(() => setWebflashStatus("Failed to prepare web flash", "err")));
     document.getElementById("webflash_prepare_no_audio_btn").addEventListener("click", () => prepareWebflash("no_audio").catch(() => setWebflashStatus("Failed to prepare web flash", "err")));
 
+    document.getElementById("preview_img").src = withCid("/preview.mjpg");
     loadSettings().catch(() => setStatus("Failed to load settings", "err"));
     populateFirmwareDefaultsFromSettings();
     loadFlashStatus().catch(() => setFlashStatus("Failed to load flash status", "err"));
     setInterval(() => {
-      fetch("/api/settings")
+      fetch(withCid("/api/settings"))
         .then(r => r.json())
         .then(d => updateState(d.state))
         .catch(() => {});

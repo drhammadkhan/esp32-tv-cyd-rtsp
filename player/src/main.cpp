@@ -57,6 +57,7 @@
 char FRAME_URL[128] = {0};
 char AUDIO_URL[128] = {0};
 char CHANNEL_INFO_URL[128] = {0};
+char CLIENT_QUERY[48] = {0};
 char TUNING_SERVER_INFO[80] = {0};
 
 #ifdef HAS_IR_REMOTE
@@ -156,8 +157,10 @@ void setup()
   snprintf(FRAME_URL, sizeof(FRAME_URL), "http://%s:%d/%s", VIDEO_SERVER_HOST, videoServerPort, FRAME_ENDPOINT);
   snprintf(AUDIO_URL, sizeof(AUDIO_URL), "http://%s:%d/audio", VIDEO_SERVER_HOST, videoServerPort);
   snprintf(CHANNEL_INFO_URL, sizeof(CHANNEL_INFO_URL), "http://%s:%d/channel_info", VIDEO_SERVER_HOST, videoServerPort);
+  uint64_t chipId = ESP.getEfuseMac();
+  snprintf(CLIENT_QUERY, sizeof(CLIENT_QUERY), "?cid=esp32-%04X%08X", (uint16_t)(chipId >> 32), (uint32_t)chipId);
   Serial.printf("Using video server: %s:%d\n", VIDEO_SERVER_HOST, videoServerPort);
-  channelData = new NetworkChannelData(CHANNEL_INFO_URL, FRAME_URL, AUDIO_URL);
+  channelData = new NetworkChannelData(CHANNEL_INFO_URL, FRAME_URL, AUDIO_URL, CLIENT_QUERY);
   videoSource = new NetworkVideoSource((NetworkChannelData *) channelData);
 #ifndef DISABLE_AUDIO
   audioSource = new NetworkAudioSource((NetworkChannelData *) channelData);

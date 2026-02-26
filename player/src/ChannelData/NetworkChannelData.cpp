@@ -3,7 +3,11 @@
 #include <HTTPClient.h>
 #include "NetworkChannelData.h"
 
-NetworkChannelData::NetworkChannelData(const char *channelInfoURL, const char *frameURL, const char *audioURL) : mChannelInfoURL(channelInfoURL), mFrameURL(frameURL), mAudioURL(audioURL) {
+NetworkChannelData::NetworkChannelData(const char *channelInfoURL, const char *frameURL, const char *audioURL, const char *clientQuery)
+    : mChannelInfoURL(channelInfoURL),
+      mFrameURL(frameURL),
+      mAudioURL(audioURL),
+      mClientQuery(clientQuery ? clientQuery : "") {
 
 }
 
@@ -44,6 +48,10 @@ std::string NetworkChannelData::getFrameURL() {
 
 std::string NetworkChannelData::getAudioURL() {
   return mAudioURL + "/" + std::to_string(mChannelNumber);
+}
+
+std::string NetworkChannelData::getClientQuery() {
+  return mClientQuery;
 }
 
 void NetworkChannelData::setChannel(int channel) {

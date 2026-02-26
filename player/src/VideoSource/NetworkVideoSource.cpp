@@ -43,7 +43,7 @@ void NetworkVideoSource::frameDownloaderTask()
     int videoTime = mAudioTimeMs + elapsedTime;
     if (WiFi.status() == WL_CONNECTED)
     {
-      std::string url = mChannelData->getFrameURL() + "/" + std::to_string(videoTime);
+      std::string url = mChannelData->getFrameURL() + "/" + std::to_string(videoTime) + mChannelData->getClientQuery();
       http.begin(url.c_str());
 int httpCode = http.GET();
 
