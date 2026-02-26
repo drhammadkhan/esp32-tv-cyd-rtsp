@@ -75,8 +75,6 @@ capture_state = {
 
 active_stream_lock = threading.Lock()
 active_stream_index = 0
-last_requested_channel_lock = threading.Lock()
-last_requested_channel_index = -1
 
 video_data = []
 latest_jpeg = None
@@ -232,27 +230,24 @@ def _set_active_stream_index(idx):
         active_stream_index = idx
 
 
-def _reset_last_requested_channel():
-    global last_requested_channel_index
-    with last_requested_channel_lock:
-        last_requested_channel_index = -1
-
-
 def _set_active_stream_from_channel(channel_index):
     cfg = _settings_for_response()
     streams = cfg.get("streams", [])
     if len(streams) == 0:
         _set_active_stream_index(0)
         return 0
-    # Only switch stream when channel number changes; repeated /frame requests
-    # for the same channel should not fight manual selection in the web UI.
-    global last_requested_channel_index
-    with last_requested_channel_lock:
-        if channel_index == last_requested_channel_index:
-            return _get_active_stream_index() % len(streams)
-        last_requested_channel_index = channel_index
     idx = channel_index % len(streams)
-    _set_active_stream_index(idx)
+    current = _get_active_stream_index() % len(streams)
+    if idx != current:
+        _set_active_stream_index(idx)
+        # Keep UI/settings aligned with physical channel selection from CYD.
+        with settings_lock:
+            settings["active_stream_index"] = idx
+            settings["rtsp_url"] = streams[idx]["url"]
+        try:
+            _persist_settings()
+        except Exception as ex:
+            print("warning: failed to persist stream selection:", ex)
     return idx
 
 
@@ -549,7 +544,6 @@ def init_video_source():
     global video_data, latest_jpeg, running
     _load_settings()
     _set_active_stream_index(_settings_for_response().get("active_stream_index", 0))
-    _reset_last_requested_channel()
     if _is_rtsp_mode():
         latest_jpeg = _encode_black_frame()
         running = True
@@ -649,6 +643,8 @@ def api_get_settings():
     streams = cfg.get("streams", [])
     if len(streams) > 0:
         idx = _get_active_stream_index() % len(streams)
+        cfg["active_stream_index"] = idx
+        cfg["rtsp_url"] = streams[idx]["url"]
         state["active_stream_index"] = idx
         state["active_stream_name"] = streams[idx]["name"]
     return jsonify({"settings": cfg, "state": state, "app_version": APP_VERSION})
