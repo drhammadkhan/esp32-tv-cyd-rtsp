@@ -75,6 +75,7 @@ RTSP_STALE_RECONNECT_MS = _int_env("RTSP_STALE_RECONNECT_MS", 12000, minimum=200
 RTSP_CAPTURE_BUFFER_SIZE = _int_env("RTSP_CAPTURE_BUFFER_SIZE", 1, minimum=0, maximum=32)
 RTSP_CAPTURE_WIDTH = _int_env("RTSP_CAPTURE_WIDTH", 0, minimum=0, maximum=4096)
 RTSP_CAPTURE_HEIGHT = _int_env("RTSP_CAPTURE_HEIGHT", 0, minimum=0, maximum=4096)
+RTSP_READ_RETRY_COUNT = _int_env("RTSP_READ_RETRY_COUNT", 12, minimum=1, maximum=120)
 RTSP_FPS_MAX = _int_env("RTSP_FPS_MAX", 18, minimum=1, maximum=60)
 RTSP_FPS_BALANCED = _int_env("RTSP_FPS_BALANCED", 12, minimum=1, maximum=60)
 RTSP_FPS_BEST_QUALITY = _int_env("RTSP_FPS_BEST_QUALITY", 10, minimum=1, maximum=60)
@@ -308,6 +309,9 @@ def _settings_for_response():
     cfg["streams"] = streams
     cfg["active_stream_index"] = idx
     cfg["rtsp_url"] = streams[idx]["url"] if streams else ""
+    cfg["ha_base_url"] = _normalize_ha_base_url(cfg.get("ha_base_url", ""))
+    if not str(cfg.get("motion_voice_default_entity", "")).strip():
+        cfg["motion_voice_default_entity"] = DEFAULT_MOTION_VOICE_ENTITY
     return cfg
 
 
@@ -622,6 +626,22 @@ def _normalize_ha_base_url(url: str) -> str:
     base = str(url or "").strip()
     if not base:
         return ""
+    # Tolerate accidental duplicated schemes from copy/paste (e.g. http://http://host:8123).
+    normalized = True
+    while normalized:
+        normalized = False
+        if base.startswith("http://http://"):
+            base = "http://" + base[len("http://http://"):]
+            normalized = True
+        elif base.startswith("https://https://"):
+            base = "https://" + base[len("https://https://"):]
+            normalized = True
+        elif base.startswith("http://https://"):
+            base = "https://" + base[len("http://https://"):]
+            normalized = True
+        elif base.startswith("https://http://"):
+            base = "http://" + base[len("https://http://"):]
+            normalized = True
     if base.endswith("/"):
         base = base[:-1]
     return base
@@ -672,28 +692,64 @@ def _post_motion_voice_tts(base_url: str, token: str, tts_entity: str, speaker_e
     if not speaker_entity:
         _set_motion_voice_error("Speaker entity missing")
         return
-    url = f"{_normalize_ha_base_url(base_url)}/api/services/tts/speak"
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
         "User-Agent": "esp32-tv-server/1.0",
     }
-    payload = {
-        "entity_id": tts_entity,
-        "media_player_entity_id": speaker_entity,
-        "message": message,
-    }
+    base = _normalize_ha_base_url(base_url)
+
+    # Wake grouped/cast players before TTS.
+    try:
+        wake_url = f"{base}/api/services/media_player/turn_on"
+        wake_payload = {"entity_id": speaker_entity}
+        wake_req = urllib.request.Request(
+            url=wake_url,
+            data=json.dumps(wake_payload, ensure_ascii=True).encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
+        with urllib.request.urlopen(wake_req, timeout=4):
+            pass
+    except Exception:
+        # Don't block TTS on wake-up failures.
+        pass
+
+    entity = str(tts_entity).strip().lower()
+    legacy_service = ""
+    if "google_translate" in entity:
+        legacy_service = "google_translate_say"
+    elif "cloud" in entity:
+        legacy_service = "cloud_say"
+
+    if legacy_service:
+        url = f"{base}/api/services/tts/{legacy_service}"
+        payload = {
+            "entity_id": speaker_entity,
+            "message": message,
+            "cache": False,
+        }
+        service_label = legacy_service
+    else:
+        url = f"{base}/api/services/tts/speak"
+        payload = {
+            "entity_id": tts_entity,
+            "media_player_entity_id": speaker_entity,
+            "message": message,
+        }
+        service_label = "speak"
+
     body = json.dumps(payload, ensure_ascii=True).encode("utf-8")
     req = urllib.request.Request(url=url, data=body, headers=headers, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=6) as resp:
             code = int(getattr(resp, "status", 0) or resp.getcode())
             if code >= 300:
-                _set_motion_voice_error(f"HA TTS HTTP {code}")
+                _set_motion_voice_error(f"HA TTS {service_label} HTTP {code}")
     except urllib.error.HTTPError as ex:
-        _set_motion_voice_error(f"HA TTS HTTP {ex.code}")
+        _set_motion_voice_error(f"HA TTS {service_label} HTTP {ex.code}")
     except Exception as ex:
-        _set_motion_voice_error(f"HA TTS failed: {ex}")
+        _set_motion_voice_error(f"HA TTS {service_label} failed: {ex}")
 
 
 def _is_motion_voice_enabled_for_stream(cfg: dict, stream_idx: int) -> bool:
@@ -1004,6 +1060,7 @@ def _stream_capture_worker(worker):
         last_emit = 0.0
         prev_gray = None
         last_read_ok_ms = _now_ms()
+        consecutive_read_failures = 0
         while worker["running"]:
             now_ms = _now_ms()
             if now_ms - last_read_ok_ms > RTSP_STALE_RECONNECT_MS:
@@ -1012,9 +1069,15 @@ def _stream_capture_worker(worker):
                 break
             ok, frame = cap.read()
             if not ok:
+                consecutive_read_failures += 1
+                if consecutive_read_failures < RTSP_READ_RETRY_COUNT:
+                    # Briefly tolerate dropped reads so we don't reconnect on transient RTSP jitter.
+                    time.sleep(0.03)
+                    continue
                 worker["status"] = "reconnecting"
-                worker["last_error"] = "stream read failed"
+                worker["last_error"] = f"stream read failed ({consecutive_read_failures} retries)"
                 break
+            consecutive_read_failures = 0
             last_read_ok_ms = _now_ms()
             cfg = _get_settings()
             preset = cfg.get("preset", "balanced")
@@ -1406,7 +1469,7 @@ def api_set_settings():
     if "ha_direct_tts_enabled" in payload:
         updates["ha_direct_tts_enabled"] = bool(payload["ha_direct_tts_enabled"])
     if "ha_base_url" in payload:
-        base_url = str(payload["ha_base_url"] or "").strip()
+        base_url = _normalize_ha_base_url(payload["ha_base_url"])
         if base_url and not (base_url.startswith("http://") or base_url.startswith("https://")):
             errors.append("ha_base_url must start with http:// or https://")
         else:
