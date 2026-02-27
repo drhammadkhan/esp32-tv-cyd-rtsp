@@ -84,7 +84,7 @@ if not os.getenv("OPENCV_FFMPEG_CAPTURE_OPTIONS"):
     ffmpeg_timeout_us = max(RTSP_READ_TIMEOUT_MS, RTSP_OPEN_TIMEOUT_MS) * 1000
     os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
         f"rtsp_transport;tcp|stimeout;{ffmpeg_timeout_us}|rw_timeout;{ffmpeg_timeout_us}|"
-        "fflags;nobuffer|flags;low_delay|max_delay;500000"
+        "max_delay;1000000|buffer_size;1048576"
     )
 
 settings_lock = threading.Lock()
