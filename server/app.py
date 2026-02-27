@@ -104,6 +104,9 @@ settings = {
     "motion_audio_enabled": os.getenv("MOTION_AUDIO_ENABLED", "1") == "1",
     "motion_voice_enabled": os.getenv("MOTION_VOICE_ENABLED", "0") == "1",
     "motion_voice_cooldown_ms": int(os.getenv("MOTION_VOICE_COOLDOWN_MS", "30000")),
+    "motion_voice_daytime_only": os.getenv("MOTION_VOICE_DAYTIME_ONLY", "0") == "1",
+    "motion_voice_start_hour": _int_env("MOTION_VOICE_START_HOUR", 8, minimum=0, maximum=23),
+    "motion_voice_end_hour": _int_env("MOTION_VOICE_END_HOUR", 22, minimum=0, maximum=23),
     "motion_voice_message": os.getenv("MOTION_VOICE_MESSAGE", "Motion detected on {stream_name}"),
     "motion_voice_default_entity": DEFAULT_MOTION_VOICE_ENTITY,
     "ha_direct_tts_enabled": os.getenv("HA_DIRECT_TTS_ENABLED", "1") == "1",
@@ -312,6 +315,15 @@ def _settings_for_response():
     cfg["ha_base_url"] = _normalize_ha_base_url(cfg.get("ha_base_url", ""))
     if not str(cfg.get("motion_voice_default_entity", "")).strip():
         cfg["motion_voice_default_entity"] = DEFAULT_MOTION_VOICE_ENTITY
+    cfg["motion_voice_daytime_only"] = bool(cfg.get("motion_voice_daytime_only", False))
+    try:
+        cfg["motion_voice_start_hour"] = max(0, min(23, int(cfg.get("motion_voice_start_hour", 8))))
+    except Exception:
+        cfg["motion_voice_start_hour"] = 8
+    try:
+        cfg["motion_voice_end_hour"] = max(0, min(23, int(cfg.get("motion_voice_end_hour", 22))))
+    except Exception:
+        cfg["motion_voice_end_hour"] = 22
     return cfg
 
 
@@ -383,6 +395,18 @@ def _load_settings():
             try:
                 value = int(loaded["motion_voice_cooldown_ms"])
                 settings["motion_voice_cooldown_ms"] = max(1000, min(3_600_000, value))
+            except Exception:
+                pass
+        if "motion_voice_daytime_only" in loaded:
+            settings["motion_voice_daytime_only"] = bool(loaded["motion_voice_daytime_only"])
+        if "motion_voice_start_hour" in loaded:
+            try:
+                settings["motion_voice_start_hour"] = max(0, min(23, int(loaded["motion_voice_start_hour"])))
+            except Exception:
+                pass
+        if "motion_voice_end_hour" in loaded:
+            try:
+                settings["motion_voice_end_hour"] = max(0, min(23, int(loaded["motion_voice_end_hour"])))
             except Exception:
                 pass
         if "motion_voice_message" in loaded:
@@ -771,6 +795,29 @@ def _resolve_motion_voice_entity(cfg: dict, stream_idx: int) -> str:
     return fallback_entity[:128]
 
 
+def _is_hour_within_window(hour: int, start_hour: int, end_hour: int) -> bool:
+    if start_hour == end_hour:
+        return True
+    if start_hour < end_hour:
+        return start_hour <= hour < end_hour
+    return hour >= start_hour or hour < end_hour
+
+
+def _is_motion_voice_time_allowed(cfg: dict) -> bool:
+    if not bool(cfg.get("motion_voice_daytime_only", False)):
+        return True
+    try:
+        start_hour = max(0, min(23, int(cfg.get("motion_voice_start_hour", 8))))
+    except Exception:
+        start_hour = 8
+    try:
+        end_hour = max(0, min(23, int(cfg.get("motion_voice_end_hour", 22))))
+    except Exception:
+        end_hour = 22
+    local_hour = int(time.localtime().tm_hour)
+    return _is_hour_within_window(local_hour, start_hour, end_hour)
+
+
 def _maybe_send_motion_voice_alert(stream_idx: int, ratio: float, detected_ms: int):
     cfg = _settings_for_response()
     if not cfg.get("motion_enabled", False):
@@ -778,6 +825,8 @@ def _maybe_send_motion_voice_alert(stream_idx: int, ratio: float, detected_ms: i
     if not cfg.get("motion_voice_enabled", False):
         return
     if not _is_motion_voice_enabled_for_stream(cfg, int(stream_idx)):
+        return
+    if not _is_motion_voice_time_allowed(cfg):
         return
     use_direct_tts = bool(cfg.get("ha_direct_tts_enabled", True))
     base_url = _normalize_ha_base_url(str(cfg.get("ha_base_url", "")))
@@ -1307,16 +1356,41 @@ def get_frame_tdisplay(channel_index, ms):
 def preview_mjpg():
     client_id = _get_request_client_id()
 
+    def _generate(forced_idx=None):
+        boundary = b"--frame\r\n"
+        while True:
+            cfg = _settings_for_response()
+            streams = cfg.get("streams", [])
+            if len(streams) > 0:
+                if forced_idx is None:
+                    idx = _get_client_active_stream_index(client_id, len(streams))
+                    _cleanup_client_sessions(keep_client_id=client_id)
+                else:
+                    idx = max(0, min(int(forced_idx), len(streams) - 1))
+                worker = _get_or_start_stream_worker(idx, streams[idx]["url"])
+                _cleanup_stream_workers(keep_idx=idx)
+                frame = worker.get("latest_jpeg") or _encode_black_frame()
+            else:
+                frame = _encode_black_frame()
+            yield boundary
+            yield b"Content-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
+            # Match primary preview cadence so side feeds feel equivalent.
+            time.sleep(0.08)
+
+    return Response(_generate(), mimetype="multipart/x-mixed-replace; boundary=frame")
+
+
+@app.route("/preview/<int:channel_index>.mjpg")
+def preview_channel_mjpg(channel_index):
     def _generate():
         boundary = b"--frame\r\n"
         while True:
             cfg = _settings_for_response()
             streams = cfg.get("streams", [])
             if len(streams) > 0:
-                idx = _get_client_active_stream_index(client_id, len(streams))
+                idx = max(0, min(int(channel_index), len(streams) - 1))
                 worker = _get_or_start_stream_worker(idx, streams[idx]["url"])
                 _cleanup_stream_workers(keep_idx=idx)
-                _cleanup_client_sessions(keep_client_id=client_id)
                 frame = worker.get("latest_jpeg") or _encode_black_frame()
             else:
                 frame = _encode_black_frame()
@@ -1357,6 +1431,39 @@ def api_get_settings():
             "last_sent_speaker_entity": str(motion_voice_state.get("last_sent_speaker_entity", "")),
             "last_error": str(motion_voice_state.get("last_error", "")),
         }
+    with stream_workers_lock:
+        worker_snapshots = {
+            int(idx): {
+                "status": str(worker.get("status", "")),
+                "last_error": str(worker.get("last_error", "")),
+                "last_frame_ms": int(worker.get("last_frame_ms", 0) or 0),
+                "motion_ratio": float(worker.get("motion_ratio", 0.0) or 0.0),
+            }
+            for idx, worker in stream_workers.items()
+        }
+    now_ms = _now_ms()
+    stream_states = []
+    for idx, stream in enumerate(streams):
+        worker = worker_snapshots.get(idx, {})
+        motion_active_for_idx = bool(
+            motion_snapshot.get("active", False)
+            and now_ms < int(motion_snapshot.get("triggered_until_ms", 0))
+            and int(motion_snapshot.get("source_stream_idx", -1)) == int(idx)
+        )
+        voice_for_idx = int(voice_snapshot.get("last_sent_stream_idx", -1)) == int(idx)
+        stream_states.append({
+            "idx": int(idx),
+            "name": str(stream.get("name", f"Stream {idx + 1}")),
+            "source": str(stream.get("url", "")),
+            "status": str(worker.get("status", "idle")),
+            "last_error": str(worker.get("last_error", "")),
+            "last_frame_ms": int(worker.get("last_frame_ms", 0) or 0),
+            "motion_ratio": float(worker.get("motion_ratio", 0.0) or 0.0),
+            "motion_active": motion_active_for_idx,
+            "voice_last_sent_ms": int(voice_snapshot.get("last_sent_ms", 0) or 0) if voice_for_idx else 0,
+            "voice_last_error": str(voice_snapshot.get("last_error", "")) if voice_for_idx else "",
+            "voice_last_speaker_entity": str(voice_snapshot.get("last_sent_speaker_entity", "")) if voice_for_idx else "",
+        })
     state["motion_active"] = bool(
         motion_snapshot.get("active", False)
         and _now_ms() < int(motion_snapshot.get("triggered_until_ms", 0))
@@ -1368,7 +1475,7 @@ def api_get_settings():
     state["motion_voice_last_stream_name"] = voice_snapshot["last_sent_stream_name"]
     state["motion_voice_last_speaker_entity"] = voice_snapshot["last_sent_speaker_entity"]
     state["motion_voice_last_error"] = voice_snapshot["last_error"]
-    return jsonify({"settings": cfg, "state": state, "app_version": APP_VERSION})
+    return jsonify({"settings": cfg, "state": state, "stream_states": stream_states, "app_version": APP_VERSION})
 
 
 @app.route("/api/settings", methods=["POST"])
@@ -1462,6 +1569,24 @@ def api_set_settings():
             updates["motion_voice_cooldown_ms"] = motion_voice_cooldown_ms
         except Exception:
             errors.append("motion_voice_cooldown_ms must be between 1000 and 3600000")
+    if "motion_voice_daytime_only" in payload:
+        updates["motion_voice_daytime_only"] = bool(payload["motion_voice_daytime_only"])
+    if "motion_voice_start_hour" in payload:
+        try:
+            hour = int(payload["motion_voice_start_hour"])
+            if hour < 0 or hour > 23:
+                raise ValueError
+            updates["motion_voice_start_hour"] = hour
+        except Exception:
+            errors.append("motion_voice_start_hour must be an integer between 0 and 23")
+    if "motion_voice_end_hour" in payload:
+        try:
+            hour = int(payload["motion_voice_end_hour"])
+            if hour < 0 or hour > 23:
+                raise ValueError
+            updates["motion_voice_end_hour"] = hour
+        except Exception:
+            errors.append("motion_voice_end_hour must be an integer between 0 and 23")
     if "motion_voice_message" in payload:
         updates["motion_voice_message"] = str(payload["motion_voice_message"] or "")[:240]
     if "motion_voice_default_entity" in payload:
@@ -1803,6 +1928,74 @@ def admin_ui():
       display: grid;
       gap: 3px;
     }
+    .all-feeds-box {
+      margin-top: 0;
+      padding-top: 0;
+    }
+    .all-feeds-grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 8px;
+      margin-top: 8px;
+    }
+    .feed-tile {
+      width: 100%;
+      text-align: left;
+      border: 1px solid #d6deea;
+      border-radius: 10px;
+      background: #f8fbff;
+      padding: 0;
+      overflow: hidden;
+      color: #1f2937;
+    }
+    .feed-tile.active {
+      border-color: #0d8fdf;
+      box-shadow: inset 0 0 0 1px #0d8fdf;
+      background: #eaf5ff;
+    }
+    .feed-thumb {
+      width: 100%;
+      aspect-ratio: 4 / 3;
+      object-fit: cover;
+      border-radius: 12px;
+      border: 2px solid #d7e2ef;
+      background: #0c1420;
+      display: block;
+    }
+    .feed-head {
+      font-size: 13px;
+      font-weight: 700;
+      color: #1f2f46;
+      margin-top: 6px;
+      padding: 0 8px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .feed-url {
+      font-size: 11px;
+      color: #58687d;
+      margin-top: 3px;
+      padding: 0 8px 8px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .feed-stats {
+      border-top: 1px solid #d7e2ef;
+      background: #f2f7fd;
+      padding: 6px 8px 8px;
+      display: grid;
+      gap: 4px;
+    }
+    .feed-stat {
+      font-size: 11px;
+      color: #475569;
+      line-height: 1.25;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
     @media (max-width: 900px) {
       .wrap { grid-template-columns: 1fr; }
     }
@@ -1945,6 +2138,18 @@ def admin_ui():
         <label for="motion_voice_enabled" style="margin:0">Home Assistant Voice Alerts Enabled</label>
       </div>
       <div class="row toggle">
+        <input id="motion_voice_daytime_only" type="checkbox" />
+        <label for="motion_voice_daytime_only" style="margin:0">Voice Alerts Daytime Only</label>
+      </div>
+      <div class="row">
+        <label for="motion_voice_start_hour">Daytime Start Hour (0-23)</label>
+        <input id="motion_voice_start_hour" type="number" min="0" max="23" step="1" />
+      </div>
+      <div class="row">
+        <label for="motion_voice_end_hour">Daytime End Hour (0-23)</label>
+        <input id="motion_voice_end_hour" type="number" min="0" max="23" step="1" />
+      </div>
+      <div class="row toggle">
         <input id="ha_direct_tts_enabled" type="checkbox" />
         <label for="ha_direct_tts_enabled" style="margin:0">Use Direct Home Assistant TTS (No YAML)</label>
       </div>
@@ -1983,6 +2188,7 @@ def admin_ui():
       <p style="margin: 6px 0 0; font-size: 12px; color: var(--muted);">
         Set per-stream voice alerts in the stream list below.
         Direct TTS mode does not require Home Assistant YAML.
+        Daytime window uses the server's local timezone.
       </p>
 
       <div class="actions">
@@ -1995,15 +2201,9 @@ def admin_ui():
     </section>
 
     <section class="card">
-      <img id="preview_img" class="preview" src="/preview.mjpg" alt="Live Preview" />
-      <div class="meta">
-        <div><strong>Status:</strong> <span id="meta_status">-</span></div>
-        <div><strong>Active stream:</strong> <span id="meta_active_stream">-</span></div>
-        <div><strong>Source:</strong> <span id="meta_source">-</span></div>
-        <div><strong>Last frame:</strong> <span id="meta_frame">-</span></div>
-        <div><strong>Motion:</strong> <span id="meta_motion">-</span></div>
-        <div><strong>Voice alert:</strong> <span id="meta_voice_alert">-</span></div>
-        <div><strong>Last error:</strong> <span id="meta_error">-</span></div>
+      <div class="all-feeds-box">
+        <label style="margin:0">All Saved Feeds</label>
+        <div id="all_feeds_grid" class="all-feeds-grid"></div>
       </div>
     </section>
 
@@ -2163,6 +2363,88 @@ def admin_ui():
     let isDirty = false;
     const streamListEl = document.getElementById("stream_list");
     const activeStreamEl = document.getElementById("active_stream_index");
+    const allFeedsGridEl = document.getElementById("all_feeds_grid");
+
+    function renderAllFeedsGrid(streams, activeIndex) {
+      if (!allFeedsGridEl) return;
+      allFeedsGridEl.innerHTML = "";
+      if (!streams || streams.length === 0) {
+        const empty = document.createElement("div");
+        empty.className = "feed-url";
+        empty.textContent = "No saved feeds yet.";
+        allFeedsGridEl.appendChild(empty);
+        return;
+      }
+      streams.forEach((stream, i) => {
+        const item = document.createElement("button");
+        item.type = "button";
+        item.className = "feed-tile" + (Number(activeIndex) === i ? " active" : "");
+        item.dataset.idx = String(i);
+        const img = document.createElement("img");
+        img.className = "feed-thumb";
+        img.alt = stream.name || `Stream ${i + 1}`;
+        img.dataset.idx = String(i);
+        img.src = withCid(`/preview/${i}.mjpg`);
+        const head = document.createElement("div");
+        head.className = "feed-head";
+        const route = stream.motion_voice
+          ? (stream.voice_entity ? ` [voice:${stream.voice_entity}]` : " [voice]")
+          : "";
+        head.textContent = `${i + 1}. ${stream.name || `Stream ${i + 1}`}${route}`;
+        const url = document.createElement("div");
+        url.className = "feed-url";
+        url.textContent = stream.url || "-";
+        const stats = document.createElement("div");
+        stats.className = "feed-stats";
+        const sourceRow = document.createElement("div");
+        sourceRow.className = "feed-stat";
+        sourceRow.innerHTML = "<strong>Source:</strong> ";
+        const sourceValue = document.createElement("span");
+        sourceValue.className = "feed-source";
+        sourceValue.textContent = stream.url || "-";
+        sourceRow.appendChild(sourceValue);
+        const frameRow = document.createElement("div");
+        frameRow.className = "feed-stat";
+        frameRow.innerHTML = "<strong>Last frame:</strong> ";
+        const frameValue = document.createElement("span");
+        frameValue.className = "feed-frame";
+        frameValue.textContent = "-";
+        frameRow.appendChild(frameValue);
+        const motionRow = document.createElement("div");
+        motionRow.className = "feed-stat";
+        motionRow.innerHTML = "<strong>Motion detection:</strong> ";
+        const motionValue = document.createElement("span");
+        motionValue.className = "feed-motion";
+        motionValue.textContent = "idle";
+        motionRow.appendChild(motionValue);
+        const voiceRow = document.createElement("div");
+        voiceRow.className = "feed-stat";
+        voiceRow.innerHTML = "<strong>Voice alert:</strong> ";
+        const voiceValue = document.createElement("span");
+        voiceValue.className = "feed-voice";
+        voiceValue.textContent = "idle";
+        voiceRow.appendChild(voiceValue);
+        stats.appendChild(sourceRow);
+        stats.appendChild(frameRow);
+        stats.appendChild(motionRow);
+        stats.appendChild(voiceRow);
+        item.appendChild(img);
+        item.appendChild(head);
+        item.appendChild(url);
+        item.appendChild(stats);
+        item.addEventListener("click", () => {
+          activeStreamEl.value = String(i);
+          activeStreamEl.dispatchEvent(new Event("change"));
+        });
+        allFeedsGridEl.appendChild(item);
+      });
+    }
+
+    function setAllFeedsActive(activeIndex) {
+      document.querySelectorAll(".feed-tile").forEach((item) => {
+        item.classList.toggle("active", Number(item.dataset.idx) === Number(activeIndex));
+      });
+    }
 
     function getStreamRows() {
       const rows = [];
@@ -2195,10 +2477,12 @@ def admin_ui():
         opt.textContent = `${i + 1}. ${stream.name} ${route}`;
         activeStreamEl.appendChild(opt);
       });
+      let idx = 0;
       if (streams.length > 0) {
-        const idx = Math.max(0, Math.min(Number(selectedIndex || 0), streams.length - 1));
+        idx = Math.max(0, Math.min(Number(selectedIndex || 0), streams.length - 1));
         activeStreamEl.value = String(idx);
       }
+      renderAllFeedsGrid(streams, idx);
     }
 
     function addStreamRow(stream, shouldRefresh) {
@@ -2242,6 +2526,9 @@ def admin_ui():
       document.getElementById("motion_hold_ms").value = (s.motion_hold_ms ?? 4000);
       document.getElementById("motion_audio_enabled").checked = (s.motion_audio_enabled ?? true);
       document.getElementById("motion_voice_enabled").checked = !!s.motion_voice_enabled;
+      document.getElementById("motion_voice_daytime_only").checked = !!s.motion_voice_daytime_only;
+      document.getElementById("motion_voice_start_hour").value = (s.motion_voice_start_hour ?? 8);
+      document.getElementById("motion_voice_end_hour").value = (s.motion_voice_end_hour ?? 22);
       document.getElementById("motion_voice_cooldown_ms").value = (s.motion_voice_cooldown_ms ?? 30000);
       document.getElementById("motion_voice_message").value = (s.motion_voice_message ?? "Motion detected on {stream_name}");
       document.getElementById("motion_voice_default_entity").value = (s.motion_voice_default_entity || "media_player.library_pair");
@@ -2255,32 +2542,44 @@ def admin_ui():
       setStreams(s.streams || [], s.active_stream_index || 0);
     }
 
-    function updateState(st) {
+    function updateState(st, streamStates) {
       st = st || {};
-      document.getElementById("meta_status").textContent = st.status || "-";
-      document.getElementById("meta_source").textContent = st.source || "-";
-      document.getElementById("meta_active_stream").textContent = st.active_stream_name || "-";
-      document.getElementById("meta_error").textContent = st.last_error || "-";
-      if (st.motion_active) {
-        document.getElementById("meta_motion").textContent = `detected (${(st.motion_ratio || 0).toFixed(2)}%)`;
-      } else {
-        document.getElementById("meta_motion").textContent = "idle";
-      }
-      const voiceErr = st.motion_voice_last_error || "";
-      if (voiceErr) {
-        document.getElementById("meta_voice_alert").textContent = `error: ${voiceErr}`;
-      } else if (st.motion_voice_last_sent_ms) {
-        const streamLabel = st.motion_voice_last_stream_name || `#${Number(st.motion_voice_last_stream_idx || 0) + 1}`;
-        const speaker = st.motion_voice_last_speaker_entity || "default";
-        document.getElementById("meta_voice_alert").textContent = `sent to ${streamLabel} -> ${speaker} @ ${new Date(st.motion_voice_last_sent_ms).toLocaleTimeString()}`;
-      } else {
-        document.getElementById("meta_voice_alert").textContent = "idle";
-      }
-      if (st.last_frame_ms) {
-        document.getElementById("meta_frame").textContent = new Date(st.last_frame_ms).toLocaleTimeString();
-      } else {
-        document.getElementById("meta_frame").textContent = "-";
-      }
+      const byIdx = new Map();
+      (streamStates || []).forEach((entry) => {
+        byIdx.set(Number(entry.idx), entry || {});
+      });
+      document.querySelectorAll(".feed-tile").forEach((item) => {
+        const idx = Number(item.dataset.idx || 0);
+        const entry = byIdx.get(idx) || {};
+        const sourceEl = item.querySelector(".feed-source");
+        const frameEl = item.querySelector(".feed-frame");
+        const motionEl = item.querySelector(".feed-motion");
+        const voiceEl = item.querySelector(".feed-voice");
+        const fallbackSource = (item.querySelector(".feed-url") || {}).textContent || "-";
+        if (sourceEl) {
+          sourceEl.textContent = entry.source || fallbackSource;
+        }
+        if (frameEl) {
+          frameEl.textContent = entry.last_frame_ms ? new Date(Number(entry.last_frame_ms)).toLocaleTimeString() : "-";
+        }
+        if (motionEl) {
+          motionEl.textContent = entry.motion_active
+            ? `detected (${(Number(entry.motion_ratio || 0)).toFixed(2)}%)`
+            : "idle";
+        }
+        if (voiceEl) {
+          const voiceErr = entry.voice_last_error || "";
+          if (voiceErr) {
+            voiceEl.textContent = `error: ${voiceErr}`;
+          } else if (entry.voice_last_sent_ms) {
+            const speaker = entry.voice_last_speaker_entity || "default";
+            voiceEl.textContent = `sent -> ${speaker} @ ${new Date(Number(entry.voice_last_sent_ms)).toLocaleTimeString()}`;
+          } else {
+            voiceEl.textContent = "idle";
+          }
+        }
+      });
+      setAllFeedsActive(Number((st.active_stream_index ?? activeStreamEl.value) || 0));
     }
 
     function hydrate(data) {
@@ -2288,7 +2587,7 @@ def admin_ui():
       if (!isDirty && s) {
         applySettingsToForm(s);
       }
-      updateState(data.state || {});
+      updateState(data.state || {}, data.stream_states || []);
     }
 
     async function loadSettings() {
@@ -2322,6 +2621,9 @@ def admin_ui():
         motion_hold_ms: Number(document.getElementById("motion_hold_ms").value),
         motion_audio_enabled: document.getElementById("motion_audio_enabled").checked,
         motion_voice_enabled: document.getElementById("motion_voice_enabled").checked,
+        motion_voice_daytime_only: document.getElementById("motion_voice_daytime_only").checked,
+        motion_voice_start_hour: Number(document.getElementById("motion_voice_start_hour").value),
+        motion_voice_end_hour: Number(document.getElementById("motion_voice_end_hour").value),
         motion_voice_cooldown_ms: Number(document.getElementById("motion_voice_cooldown_ms").value),
         motion_voice_message: document.getElementById("motion_voice_message").value.trim(),
         motion_voice_default_entity: document.getElementById("motion_voice_default_entity").value.trim(),
@@ -2408,6 +2710,7 @@ def admin_ui():
       if (streams[idx]) {
         document.getElementById("rtsp_url").value = streams[idx].url;
       }
+      setAllFeedsActive(idx);
       isDirty = true;
     });
     document.getElementById("rtsp_url").addEventListener("input", () => {
@@ -2536,14 +2839,13 @@ def admin_ui():
     document.getElementById("webflash_prepare_audio_btn").addEventListener("click", () => prepareWebflash("audio_on").catch(() => setWebflashStatus("Failed to prepare web flash", "err")));
     document.getElementById("webflash_prepare_no_audio_btn").addEventListener("click", () => prepareWebflash("no_audio").catch(() => setWebflashStatus("Failed to prepare web flash", "err")));
 
-    document.getElementById("preview_img").src = withCid("/preview.mjpg");
     loadSettings().catch(() => setStatus("Failed to load settings", "err"));
     populateFirmwareDefaultsFromSettings();
     loadFlashStatus().catch(() => setFlashStatus("Failed to load flash status", "err"));
     setInterval(() => {
       fetch(withCid("/api/settings"))
         .then(r => r.json())
-        .then(d => updateState(d.state))
+        .then(d => updateState(d.state, d.stream_states || []))
         .catch(() => {});
     }, 1500);
     setInterval(() => {
