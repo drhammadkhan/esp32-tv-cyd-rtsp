@@ -8,6 +8,7 @@
 #include "AudioSource/AudioSource.h"
 #include "Displays/Display.h"
 #include <list>
+#include "JPEGDEC.h"
 
 void VideoPlayer::_framePlayerTask(void *param)
 {
@@ -134,6 +135,8 @@ void VideoPlayer::framePlayerTask()
   uint8_t *jpegBuffer = NULL;
   size_t jpegBufferLength = 0;
   size_t jpegLength = 0;
+  unsigned long drawCount = 0;
+  unsigned long lastDrawLogMs = 0;
   // used for calculating frame rate
   std::list<int> frameTimes;
   while (true)
@@ -184,13 +187,71 @@ void VideoPlayer::framePlayerTask()
     if (mJpeg.openRAM(jpegBuffer, jpegLength, _doDraw))
     {
       mJpeg.setUserPointer(this);
-      #ifdef LED_MATRIX
       mJpeg.setPixelType(RGB565_LITTLE_ENDIAN);
-      #else
-      mJpeg.setPixelType(RGB565_LITTLE_ENDIAN);
-      #endif
-      mJpeg.decode(0, 0, 0);
+      int decodeOptions = 0;
+      int drawX = 0;
+      int drawY = 0;
+      int srcW = mJpeg.getWidth();
+      int srcH = mJpeg.getHeight();
+      int dstW = mDisplay.width();
+      int dstH = mDisplay.height();
+      if (srcW > dstW || srcH > dstH)
+      {
+        if ((srcW / 2) <= dstW && (srcH / 2) <= dstH)
+        {
+          decodeOptions = JPEG_SCALE_HALF;
+        }
+        else if ((srcW / 4) <= dstW && (srcH / 4) <= dstH)
+        {
+          decodeOptions = JPEG_SCALE_QUARTER;
+        }
+        else
+        {
+          decodeOptions = JPEG_SCALE_EIGHTH;
+        }
+      }
+      int outW = srcW;
+      int outH = srcH;
+      if (decodeOptions == JPEG_SCALE_HALF)
+      {
+        outW = srcW / 2;
+        outH = srcH / 2;
+      }
+      else if (decodeOptions == JPEG_SCALE_QUARTER)
+      {
+        outW = srcW / 4;
+        outH = srcH / 4;
+      }
+      else if (decodeOptions == JPEG_SCALE_EIGHTH)
+      {
+        outW = srcW / 8;
+        outH = srcH / 8;
+      }
+      if (outW > 0 && outH > 0)
+      {
+        drawX = (dstW - outW) / 2;
+        drawY = (dstH - outH) / 2;
+        if (drawX < 0) drawX = 0;
+        if (drawY < 0) drawY = 0;
+      }
+      mJpeg.decode(drawX, drawY, decodeOptions);
       mJpeg.close();
+      drawCount++;
+      if (millis() - lastDrawLogMs > 2000) {
+        Serial.printf(
+          "Frame Drawn: count=%lu len=%u src=%dx%d dst=%dx%d opt=%d pos=%d,%d\n",
+          drawCount,
+          (unsigned int)jpegLength,
+          srcW,
+          srcH,
+          dstW,
+          dstH,
+          decodeOptions,
+          drawX,
+          drawY
+        );
+        lastDrawLogMs = millis();
+      }
     }
     // show channel indicator 
     if (millis() - mChannelVisible < 2000) {
@@ -200,6 +261,8 @@ void VideoPlayer::framePlayerTask()
     mDisplay.drawFPS(frameTimes.size() / 5);
     #endif
     mDisplay.endWrite();
+    // Prevent starving Wi-Fi/system tasks on ESP32-S3 under continuous decode.
+    vTaskDelay(1 / portTICK_PERIOD_MS);
   }
 }
 

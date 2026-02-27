@@ -17,6 +17,9 @@ void NetworkVideoSource::frameDownloaderTask()
   http.setReuse(true);
   uint8_t *downloadBuffer = NULL;
   int downloadBufferLength = 0;
+  uint32_t okFrames = 0;
+  unsigned long lastOkLogMs = 0;
+  bool loggedUrl = false;
   while (true)
   {
     if (mState == VideoPlayerState::STOPPED || mState == VideoPlayerState::STATIC)
@@ -44,6 +47,10 @@ void NetworkVideoSource::frameDownloaderTask()
     if (WiFi.status() == WL_CONNECTED)
     {
       std::string url = mChannelData->getFrameURL() + "/" + std::to_string(videoTime) + mChannelData->getClientQuery();
+      if (!loggedUrl) {
+        Serial.printf("Frame URL sample: %s\n", url.c_str());
+        loggedUrl = true;
+      }
       http.begin(url.c_str());
 int httpCode = http.GET();
 
@@ -110,6 +117,11 @@ int httpCode = http.GET();
         if (jpegLength <= 0) {
           vTaskDelay(10 / portTICK_PERIOD_MS);
           continue;
+        }
+        okFrames++;
+        if (millis() - lastOkLogMs > 2000) {
+          Serial.printf("Frame OK: count=%lu len=%d timeMs=%d\n", (unsigned long)okFrames, jpegLength, videoTime);
+          lastOkLogMs = millis();
         }
         // lock the image buffer
         xSemaphoreTake(mCurrentFrameMutex, portMAX_DELAY);

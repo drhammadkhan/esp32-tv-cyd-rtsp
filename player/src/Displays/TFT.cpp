@@ -5,40 +5,6 @@
 #include "freertos/semphr.h"
 #include "TFT.h"
 
-#ifdef ES3N28P_ILI9341V
-static void applyES3N28PInit(TFT_eSPI *tft) {
-  auto w = [tft](uint8_t reg, std::initializer_list<uint8_t> data) {
-    tft->writecommand(reg);
-    for (uint8_t d : data) {
-      tft->writedata(d);
-    }
-  };
-  w(0xCF, {0x00, 0xC1, 0x30});
-  w(0xED, {0x64, 0x03, 0x12, 0x81});
-  w(0xE8, {0x85, 0x00, 0x78});
-  w(0xCB, {0x39, 0x2C, 0x00, 0x34, 0x02});
-  w(0xF7, {0x20});
-  w(0xEA, {0x00, 0x00});
-  w(0xC0, {0x13});
-  w(0xC1, {0x13});
-  w(0xC5, {0x22, 0x35});
-  w(0xC7, {0xBD});
-  w(0x21, {});
-  w(0x36, {0x08});
-  w(0xB6, {0x0A, 0xA2});
-  w(0x3A, {0x55});
-  w(0xF6, {0x01, 0x30});
-  w(0xB1, {0x00, 0x1B});
-  w(0xF2, {0x00});
-  w(0x26, {0x01});
-  w(0xE0, {0x0F, 0x35, 0x31, 0x0B, 0x0E, 0x06, 0x49, 0xA7, 0x33, 0x07, 0x0F, 0x03, 0x0C, 0x0A, 0x00});
-  w(0xE1, {0x00, 0x0A, 0x0F, 0x04, 0x11, 0x08, 0x36, 0x58, 0x4D, 0x07, 0x10, 0x0C, 0x32, 0x34, 0x0F});
-  w(0x11, {});
-  delay(120);
-  w(0x29, {});
-}
-#endif
-
 TFT::TFT(): tft(new TFT_eSPI()) {
   mDisplayMutex = xSemaphoreCreateRecursiveMutex();
 }
@@ -64,19 +30,25 @@ void TFT::ensureInit() {
   #endif
 
   tft->init();
-#ifdef ES3N28P_ILI9341V
-  applyES3N28PInit(tft);
-#endif
   #ifdef ES3N28P_ILI9341V
-  tft->setRotation(1);
-  // ES3N28P panel needs a custom MADCTL in landscape to avoid vertical mirroring.
-  tft->writecommand(0x36);
-  tft->writedata(0x68); // BGR | MX | MV (180 deg from previous mapping)
+  #ifndef ES3N28P_ROTATION
+  #define ES3N28P_ROTATION 1
+  #endif
+  tft->setRotation(ES3N28P_ROTATION);
   #elif defined(M5CORE2)
   tft->setRotation(6);
   #else
   tft->setRotation(1);
   #endif
+  Serial.printf("TFT init done: w=%d h=%d rot=%d\n", tft->width(), tft->height(),
+  #ifdef ES3N28P_ILI9341V
+    ES3N28P_ROTATION
+  #elif defined(M5CORE2)
+    6
+  #else
+    1
+  #endif
+  );
   tft->fillScreen(TFT_BLACK);
   #ifdef USE_DMA
   tft->initDMA();
@@ -98,6 +70,11 @@ void TFT::ensureInit() {
 
 void TFT::drawPixels(int x, int y, int width, int height, uint16_t *pixels) {
   ensureInit();
+#ifdef ES3N28P_ILI9341V
+  // On this panel, pushImage is more reliable than raw pushPixels window writes.
+  tft->pushImage(x, y, width, height, pixels);
+  return;
+#endif
   int numPixels = width * height;
   if (dmaBuffer[dmaBufferIndex] == NULL)
   {

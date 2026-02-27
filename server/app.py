@@ -8,6 +8,8 @@ import tempfile
 import hashlib
 import wave
 from pathlib import Path
+import urllib.request
+import urllib.error
 
 import cv2
 import numpy as np
@@ -19,6 +21,7 @@ app = Flask(__name__)
 FRAME_SIZE = (320, 240)
 VIDEO_SERVER_PORT = int(os.getenv("VIDEO_SERVER_PORT", "8123"))
 REPO_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_MOTION_VOICE_ENTITY = os.getenv("MOTION_VOICE_DEFAULT_ENTITY", "media_player.library_pair").strip() or "media_player.library_pair"
 
 
 def _detect_app_version():
@@ -50,6 +53,39 @@ def _detect_app_version():
 
 APP_VERSION = _detect_app_version()
 
+
+def _int_env(name: str, default: int, minimum=None, maximum=None) -> int:
+    raw = os.getenv(name, "").strip()
+    value = default
+    if raw:
+        try:
+            value = int(raw)
+        except Exception:
+            value = default
+    if minimum is not None and value < minimum:
+        value = minimum
+    if maximum is not None and value > maximum:
+        value = maximum
+    return value
+
+
+RTSP_OPEN_TIMEOUT_MS = _int_env("RTSP_OPEN_TIMEOUT_MS", 6000, minimum=500, maximum=120000)
+RTSP_READ_TIMEOUT_MS = _int_env("RTSP_READ_TIMEOUT_MS", 6000, minimum=500, maximum=120000)
+RTSP_STALE_RECONNECT_MS = _int_env("RTSP_STALE_RECONNECT_MS", 12000, minimum=2000, maximum=300000)
+RTSP_CAPTURE_BUFFER_SIZE = _int_env("RTSP_CAPTURE_BUFFER_SIZE", 1, minimum=0, maximum=32)
+RTSP_CAPTURE_WIDTH = _int_env("RTSP_CAPTURE_WIDTH", 0, minimum=0, maximum=4096)
+RTSP_CAPTURE_HEIGHT = _int_env("RTSP_CAPTURE_HEIGHT", 0, minimum=0, maximum=4096)
+RTSP_FPS_MAX = _int_env("RTSP_FPS_MAX", 18, minimum=1, maximum=60)
+RTSP_FPS_BALANCED = _int_env("RTSP_FPS_BALANCED", 12, minimum=1, maximum=60)
+RTSP_FPS_BEST_QUALITY = _int_env("RTSP_FPS_BEST_QUALITY", 10, minimum=1, maximum=60)
+
+if not os.getenv("OPENCV_FFMPEG_CAPTURE_OPTIONS"):
+    ffmpeg_timeout_us = max(RTSP_READ_TIMEOUT_MS, RTSP_OPEN_TIMEOUT_MS) * 1000
+    os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
+        f"rtsp_transport;tcp|stimeout;{ffmpeg_timeout_us}|rw_timeout;{ffmpeg_timeout_us}|"
+        "fflags;nobuffer|flags;low_delay|max_delay;500000"
+    )
+
 settings_lock = threading.Lock()
 settings = {
     "rtsp_url": os.getenv("RTSP_URL", "").strip(),
@@ -65,9 +101,19 @@ settings = {
     "motion_threshold": float(os.getenv("MOTION_THRESHOLD", "2.5")),
     "motion_hold_ms": int(os.getenv("MOTION_HOLD_MS", "4000")),
     "motion_audio_enabled": os.getenv("MOTION_AUDIO_ENABLED", "1") == "1",
+    "motion_voice_enabled": os.getenv("MOTION_VOICE_ENABLED", "0") == "1",
+    "motion_voice_cooldown_ms": int(os.getenv("MOTION_VOICE_COOLDOWN_MS", "30000")),
+    "motion_voice_message": os.getenv("MOTION_VOICE_MESSAGE", "Motion detected on {stream_name}"),
+    "motion_voice_default_entity": DEFAULT_MOTION_VOICE_ENTITY,
+    "ha_direct_tts_enabled": os.getenv("HA_DIRECT_TTS_ENABLED", "1") == "1",
+    "ha_base_url": os.getenv("HA_BASE_URL", "").strip(),
+    "ha_tts_entity": os.getenv("HA_TTS_ENTITY", "tts.google_translate_en_com").strip(),
+    "ha_webhook_url": os.getenv("HA_WEBHOOK_URL", "").strip(),
+    "ha_bearer_token": os.getenv("HA_BEARER_TOKEN", "").strip(),
+    "ha_webhook_secret": os.getenv("HA_WEBHOOK_SECRET", "").strip(),
 }
 if settings["rtsp_url"]:
-    settings["streams"] = [{"name": "Stream 1", "url": settings["rtsp_url"]}]
+    settings["streams"] = [{"name": "Stream 1", "url": settings["rtsp_url"], "motion_voice": False, "voice_entity": ""}]
     settings["active_stream_index"] = 0
 
 capture_state_lock = threading.Lock()
@@ -97,6 +143,15 @@ motion_audio_cache = {
     "path": "",
     "mtime_ms": 0,
     "data": b"",
+}
+motion_voice_lock = threading.Lock()
+motion_voice_state = {
+    "last_sent_ms": 0,
+    "last_sent_stream_idx": -1,
+    "last_sent_stream_name": "",
+    "last_sent_speaker_entity": "",
+    "last_error": "",
+    "last_sent_by_stream": {},
 }
 
 PLAYER_DIR = (REPO_ROOT / "player").resolve()
@@ -215,7 +270,12 @@ def _normalize_streams(raw_streams):
             continue
         if not name:
             name = f"Stream {len(streams) + 1}"
-        streams.append({"name": name[:64], "url": url[:2048]})
+        streams.append({
+            "name": name[:64],
+            "url": url[:2048],
+            "motion_voice": bool(item.get("motion_voice", False)),
+            "voice_entity": str(item.get("voice_entity", "")).strip()[:128],
+        })
         if len(streams) >= 16:
             break
     return streams
@@ -239,7 +299,7 @@ def _settings_for_response():
     streams = _normalize_streams(cfg.get("streams", []))
     idx = int(cfg.get("active_stream_index", 0))
     if len(streams) == 0 and cfg.get("rtsp_url", "").strip():
-        streams = [{"name": "Stream 1", "url": cfg["rtsp_url"].strip()}]
+        streams = [{"name": "Stream 1", "url": cfg["rtsp_url"].strip(), "motion_voice": False, "voice_entity": ""}]
         idx = 0
     if len(streams) == 0:
         idx = 0
@@ -313,8 +373,34 @@ def _load_settings():
                 pass
         if "motion_audio_enabled" in loaded:
             settings["motion_audio_enabled"] = bool(loaded["motion_audio_enabled"])
+        if "motion_voice_enabled" in loaded:
+            settings["motion_voice_enabled"] = bool(loaded["motion_voice_enabled"])
+        if "motion_voice_cooldown_ms" in loaded:
+            try:
+                value = int(loaded["motion_voice_cooldown_ms"])
+                settings["motion_voice_cooldown_ms"] = max(1000, min(3_600_000, value))
+            except Exception:
+                pass
+        if "motion_voice_message" in loaded:
+            settings["motion_voice_message"] = str(loaded["motion_voice_message"])[:240]
+        if "motion_voice_default_entity" in loaded:
+            settings["motion_voice_default_entity"] = str(loaded["motion_voice_default_entity"]).strip()[:128]
+        if "ha_direct_tts_enabled" in loaded:
+            settings["ha_direct_tts_enabled"] = bool(loaded["ha_direct_tts_enabled"])
+        if "ha_base_url" in loaded:
+            settings["ha_base_url"] = str(loaded["ha_base_url"]).strip()[:2048]
+        if "ha_tts_entity" in loaded:
+            settings["ha_tts_entity"] = str(loaded["ha_tts_entity"]).strip()[:128]
+        if "ha_webhook_url" in loaded:
+            settings["ha_webhook_url"] = str(loaded["ha_webhook_url"]).strip()[:2048]
+        if "ha_bearer_token" in loaded:
+            settings["ha_bearer_token"] = str(loaded["ha_bearer_token"]).strip()[:1024]
+        if "ha_webhook_secret" in loaded:
+            settings["ha_webhook_secret"] = str(loaded["ha_webhook_secret"]).strip()[:1024]
+        if not settings.get("motion_voice_default_entity"):
+            settings["motion_voice_default_entity"] = DEFAULT_MOTION_VOICE_ENTITY
         if len(settings.get("streams", [])) == 0 and settings["rtsp_url"]:
-            settings["streams"] = [{"name": "Stream 1", "url": settings["rtsp_url"]}]
+            settings["streams"] = [{"name": "Stream 1", "url": settings["rtsp_url"], "motion_voice": False, "voice_entity": ""}]
             settings["active_stream_index"] = 0
         _sync_rtsp_url_locked()
 
@@ -527,14 +613,192 @@ def _encode_black_frame():
     return buf.tobytes() if ok else b""
 
 
+def _set_motion_voice_error(message: str):
+    with motion_voice_lock:
+        motion_voice_state["last_error"] = str(message or "")[:240]
+
+
+def _normalize_ha_base_url(url: str) -> str:
+    base = str(url or "").strip()
+    if not base:
+        return ""
+    if base.endswith("/"):
+        base = base[:-1]
+    return base
+
+
+def _format_motion_voice_message(template: str, stream_name: str, stream_idx: int, ratio: float) -> str:
+    tmpl = str(template or "").strip() or "Motion detected on {stream_name}"
+    try:
+        rendered = tmpl.format(
+            stream_name=stream_name,
+            stream_index=int(stream_idx) + 1,
+            motion_ratio=f"{float(ratio):.2f}",
+        )
+        return rendered[:240]
+    except Exception:
+        return f"Motion detected on {stream_name}"[:240]
+
+
+def _post_motion_voice_alert(url: str, token: str, secret: str, payload: dict):
+    headers = {"Content-Type": "application/json", "User-Agent": "esp32-tv-server/1.0"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    if secret:
+        headers["X-Webhook-Secret"] = secret
+    body = json.dumps(payload, ensure_ascii=True).encode("utf-8")
+    req = urllib.request.Request(url=url, data=body, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            code = int(getattr(resp, "status", 0) or resp.getcode())
+            if code >= 300:
+                _set_motion_voice_error(f"HA webhook HTTP {code}")
+    except urllib.error.HTTPError as ex:
+        _set_motion_voice_error(f"HA webhook HTTP {ex.code}")
+    except Exception as ex:
+        _set_motion_voice_error(f"HA webhook failed: {ex}")
+
+
+def _post_motion_voice_tts(base_url: str, token: str, tts_entity: str, speaker_entity: str, message: str):
+    if not base_url:
+        _set_motion_voice_error("HA base URL missing")
+        return
+    if not token:
+        _set_motion_voice_error("HA bearer token missing")
+        return
+    if not tts_entity:
+        _set_motion_voice_error("HA TTS entity missing")
+        return
+    if not speaker_entity:
+        _set_motion_voice_error("Speaker entity missing")
+        return
+    url = f"{_normalize_ha_base_url(base_url)}/api/services/tts/speak"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "User-Agent": "esp32-tv-server/1.0",
+    }
+    payload = {
+        "entity_id": tts_entity,
+        "media_player_entity_id": speaker_entity,
+        "message": message,
+    }
+    body = json.dumps(payload, ensure_ascii=True).encode("utf-8")
+    req = urllib.request.Request(url=url, data=body, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            code = int(getattr(resp, "status", 0) or resp.getcode())
+            if code >= 300:
+                _set_motion_voice_error(f"HA TTS HTTP {code}")
+    except urllib.error.HTTPError as ex:
+        _set_motion_voice_error(f"HA TTS HTTP {ex.code}")
+    except Exception as ex:
+        _set_motion_voice_error(f"HA TTS failed: {ex}")
+
+
+def _is_motion_voice_enabled_for_stream(cfg: dict, stream_idx: int) -> bool:
+    streams = cfg.get("streams", [])
+    if stream_idx < 0 or stream_idx >= len(streams):
+        return False
+    stream = streams[stream_idx]
+    return bool(stream.get("motion_voice", False))
+
+
+def _resolve_motion_voice_entity(cfg: dict, stream_idx: int) -> str:
+    streams = cfg.get("streams", [])
+    stream_entity = ""
+    if stream_idx >= 0 and stream_idx < len(streams):
+        stream_entity = str(streams[stream_idx].get("voice_entity", "")).strip()
+    if stream_entity:
+        return stream_entity[:128]
+    fallback_entity = str(cfg.get("motion_voice_default_entity", "")).strip() or DEFAULT_MOTION_VOICE_ENTITY
+    return fallback_entity[:128]
+
+
+def _maybe_send_motion_voice_alert(stream_idx: int, ratio: float, detected_ms: int):
+    cfg = _settings_for_response()
+    if not cfg.get("motion_enabled", False):
+        return
+    if not cfg.get("motion_voice_enabled", False):
+        return
+    if not _is_motion_voice_enabled_for_stream(cfg, int(stream_idx)):
+        return
+    use_direct_tts = bool(cfg.get("ha_direct_tts_enabled", True))
+    base_url = _normalize_ha_base_url(str(cfg.get("ha_base_url", "")))
+    webhook_url = str(cfg.get("ha_webhook_url", "")).strip()
+    if use_direct_tts and not base_url:
+        if not webhook_url:
+            return
+        use_direct_tts = False
+    if not use_direct_tts and not webhook_url:
+        return
+    token = str(cfg.get("ha_bearer_token", "")).strip()
+    secret = str(cfg.get("ha_webhook_secret", "")).strip()
+    tts_entity = str(cfg.get("ha_tts_entity", "")).strip()
+    cooldown_ms = int(cfg.get("motion_voice_cooldown_ms", 30000))
+    now = _now_ms()
+    stream = cfg["streams"][int(stream_idx)]
+    stream_name = str(stream.get("name", f"Stream {int(stream_idx) + 1}"))
+    speaker_entity = _resolve_motion_voice_entity(cfg, int(stream_idx))
+    with motion_voice_lock:
+        by_stream = motion_voice_state.get("last_sent_by_stream", {})
+        key = str(int(stream_idx))
+        last_sent_ms = int(by_stream.get(key, 0))
+        if now - last_sent_ms < cooldown_ms:
+            return
+        by_stream[key] = now
+        motion_voice_state["last_sent_by_stream"] = by_stream
+        motion_voice_state["last_sent_ms"] = now
+        motion_voice_state["last_sent_stream_idx"] = int(stream_idx)
+        motion_voice_state["last_sent_stream_name"] = stream_name
+        motion_voice_state["last_sent_speaker_entity"] = speaker_entity
+        motion_voice_state["last_error"] = ""
+    payload = {
+        "event": "motion_detected",
+        "detected_ms": int(detected_ms),
+        "stream_index": int(stream_idx),
+        "stream_name": stream_name,
+        "stream_url": str(stream.get("url", "")),
+        "speaker_entity": speaker_entity,
+        "motion_ratio": float(ratio),
+        "message": _format_motion_voice_message(
+            cfg.get("motion_voice_message", ""),
+            stream_name,
+            int(stream_idx),
+            float(ratio),
+        ),
+    }
+    if use_direct_tts:
+        threading.Thread(
+            target=_post_motion_voice_tts,
+            args=(base_url, token, tts_entity, speaker_entity, payload["message"]),
+            daemon=True,
+        ).start()
+    else:
+        threading.Thread(
+            target=_post_motion_voice_alert,
+            args=(webhook_url, token, secret, payload),
+            daemon=True,
+        ).start()
+
+
 def _set_motion_trigger(stream_idx: int, ratio: float, hold_ms: int):
     now = _now_ms()
+    should_alert_voice = False
     with motion_state_lock:
+        was_active_same_stream = bool(
+            motion_state.get("active", False)
+            and now < int(motion_state.get("triggered_until_ms", 0))
+            and int(motion_state.get("source_stream_idx", -1)) == int(stream_idx)
+        )
         motion_state["active"] = True
         motion_state["last_motion_ms"] = now
         motion_state["last_motion_ratio"] = float(ratio)
         motion_state["triggered_until_ms"] = max(now + int(hold_ms), int(motion_state.get("triggered_until_ms", 0)))
         motion_state["source_stream_idx"] = int(stream_idx)
+        should_alert_voice = not was_active_same_stream
+    if should_alert_voice:
+        _maybe_send_motion_voice_alert(int(stream_idx), float(ratio), int(now))
 
 
 def _is_motion_active_for_stream(stream_idx: int):
@@ -688,8 +952,36 @@ def _cleanup_stream_workers(keep_idx=None):
             del stream_workers[idx]
 
 
+def _stream_target_fps(preset: str) -> int:
+    if preset == "best_quality":
+        return RTSP_FPS_BEST_QUALITY
+    if preset == "max_fps":
+        return RTSP_FPS_MAX
+    return RTSP_FPS_BALANCED
+
+
+def _set_capture_prop(cap, prop_name: str, value: int):
+    prop = getattr(cv2, prop_name, None)
+    if prop is None:
+        return
+    try:
+        cap.set(prop, float(value))
+    except Exception:
+        pass
+
+
+def _configure_capture(cap):
+    _set_capture_prop(cap, "CAP_PROP_OPEN_TIMEOUT_MSEC", RTSP_OPEN_TIMEOUT_MS)
+    _set_capture_prop(cap, "CAP_PROP_READ_TIMEOUT_MSEC", RTSP_READ_TIMEOUT_MS)
+    if RTSP_CAPTURE_BUFFER_SIZE > 0:
+        _set_capture_prop(cap, "CAP_PROP_BUFFERSIZE", RTSP_CAPTURE_BUFFER_SIZE)
+    if RTSP_CAPTURE_WIDTH > 0:
+        _set_capture_prop(cap, "CAP_PROP_FRAME_WIDTH", RTSP_CAPTURE_WIDTH)
+    if RTSP_CAPTURE_HEIGHT > 0:
+        _set_capture_prop(cap, "CAP_PROP_FRAME_HEIGHT", RTSP_CAPTURE_HEIGHT)
+
+
 def _stream_capture_worker(worker):
-    prev_gray = None
     while worker["running"]:
         url = worker["url"]
         if not url:
@@ -699,7 +991,10 @@ def _stream_capture_worker(worker):
             continue
         worker["status"] = "connecting"
         worker["last_error"] = ""
-        cap = cv2.VideoCapture(url)
+        cap = cv2.VideoCapture()
+        _set_capture_prop(cap, "CAP_PROP_OPEN_TIMEOUT_MSEC", RTSP_OPEN_TIMEOUT_MS)
+        cap.open(url)
+        _configure_capture(cap)
         if not cap.isOpened():
             worker["status"] = "error"
             worker["last_error"] = "failed to open RTSP stream"
@@ -707,13 +1002,26 @@ def _stream_capture_worker(worker):
             continue
         worker["status"] = "streaming"
         last_emit = 0.0
+        prev_gray = None
+        last_read_ok_ms = _now_ms()
         while worker["running"]:
+            now_ms = _now_ms()
+            if now_ms - last_read_ok_ms > RTSP_STALE_RECONNECT_MS:
+                worker["status"] = "reconnecting"
+                worker["last_error"] = f"stream stalled for {RTSP_STALE_RECONNECT_MS}ms"
+                break
             ok, frame = cap.read()
             if not ok:
                 worker["status"] = "reconnecting"
                 worker["last_error"] = "stream read failed"
                 break
+            last_read_ok_ms = _now_ms()
             cfg = _get_settings()
+            preset = cfg.get("preset", "balanced")
+            target_fps = _stream_target_fps(preset)
+            now = time.time()
+            if target_fps > 0 and last_emit > 0 and (now - last_emit) < (1.0 / target_fps):
+                continue
             frame = _fit_frame(frame)
             if cfg.get("motion_enabled", False):
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -725,16 +1033,11 @@ def _stream_capture_worker(worker):
                     if motion_ratio >= float(cfg.get("motion_threshold", 2.5)):
                         _set_motion_trigger(worker["idx"], motion_ratio, int(cfg.get("motion_hold_ms", 4000)))
                 prev_gray = gray
-            preset = cfg.get("preset", "balanced")
             frame = _enhance_frame(frame, cfg["contrast"], cfg["brightness"], cfg["saturation"], preset)
             if cfg["swap_rb"]:
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), cfg["jpeg_quality"]])
             if not ok:
-                continue
-            now = time.time()
-            target_fps = 12 if preset == "best_quality" else 0
-            if target_fps > 0 and last_emit > 0 and (now - last_emit) < (1.0 / target_fps):
                 continue
             worker["latest_jpeg"] = buf.tobytes()
             worker["last_frame_ms"] = _now_ms()
@@ -850,6 +1153,13 @@ def _enhance_frame(frame, contrast, brightness, saturation, preset):
 def init_video_source():
     global video_data
     _load_settings()
+    print(
+        "RTSP tuning:"
+        f" open_timeout_ms={RTSP_OPEN_TIMEOUT_MS}"
+        f" read_timeout_ms={RTSP_READ_TIMEOUT_MS}"
+        f" stale_reconnect_ms={RTSP_STALE_RECONNECT_MS}"
+        f" fps(max/balanced/quality)={RTSP_FPS_MAX}/{RTSP_FPS_BALANCED}/{RTSP_FPS_BEST_QUALITY}"
+    )
     if _is_rtsp_mode():
         print("RTSP mode enabled")
     else:
@@ -976,12 +1286,25 @@ def api_get_settings():
         state["active_stream_name"] = streams[idx]["name"]
     with motion_state_lock:
         motion_snapshot = dict(motion_state)
+    with motion_voice_lock:
+        voice_snapshot = {
+            "last_sent_ms": int(motion_voice_state.get("last_sent_ms", 0)),
+            "last_sent_stream_idx": int(motion_voice_state.get("last_sent_stream_idx", -1)),
+            "last_sent_stream_name": str(motion_voice_state.get("last_sent_stream_name", "")),
+            "last_sent_speaker_entity": str(motion_voice_state.get("last_sent_speaker_entity", "")),
+            "last_error": str(motion_voice_state.get("last_error", "")),
+        }
     state["motion_active"] = bool(
         motion_snapshot.get("active", False)
         and _now_ms() < int(motion_snapshot.get("triggered_until_ms", 0))
     )
     state["motion_last_ms"] = int(motion_snapshot.get("last_motion_ms", 0))
     state["motion_ratio"] = float(motion_snapshot.get("last_motion_ratio", 0.0))
+    state["motion_voice_last_sent_ms"] = voice_snapshot["last_sent_ms"]
+    state["motion_voice_last_stream_idx"] = voice_snapshot["last_sent_stream_idx"]
+    state["motion_voice_last_stream_name"] = voice_snapshot["last_sent_stream_name"]
+    state["motion_voice_last_speaker_entity"] = voice_snapshot["last_sent_speaker_entity"]
+    state["motion_voice_last_error"] = voice_snapshot["last_error"]
     return jsonify({"settings": cfg, "state": state, "app_version": APP_VERSION})
 
 
@@ -1066,6 +1389,58 @@ def api_set_settings():
             errors.append("motion_hold_ms must be between 200 and 60000")
     if "motion_audio_enabled" in payload:
         updates["motion_audio_enabled"] = bool(payload["motion_audio_enabled"])
+    if "motion_voice_enabled" in payload:
+        updates["motion_voice_enabled"] = bool(payload["motion_voice_enabled"])
+    if "motion_voice_cooldown_ms" in payload:
+        try:
+            motion_voice_cooldown_ms = int(payload["motion_voice_cooldown_ms"])
+            if motion_voice_cooldown_ms < 1000 or motion_voice_cooldown_ms > 3_600_000:
+                raise ValueError
+            updates["motion_voice_cooldown_ms"] = motion_voice_cooldown_ms
+        except Exception:
+            errors.append("motion_voice_cooldown_ms must be between 1000 and 3600000")
+    if "motion_voice_message" in payload:
+        updates["motion_voice_message"] = str(payload["motion_voice_message"] or "")[:240]
+    if "motion_voice_default_entity" in payload:
+        updates["motion_voice_default_entity"] = str(payload["motion_voice_default_entity"] or "").strip()[:128]
+    if "ha_direct_tts_enabled" in payload:
+        updates["ha_direct_tts_enabled"] = bool(payload["ha_direct_tts_enabled"])
+    if "ha_base_url" in payload:
+        base_url = str(payload["ha_base_url"] or "").strip()
+        if base_url and not (base_url.startswith("http://") or base_url.startswith("https://")):
+            errors.append("ha_base_url must start with http:// or https://")
+        else:
+            updates["ha_base_url"] = base_url[:2048]
+    if "ha_tts_entity" in payload:
+        updates["ha_tts_entity"] = str(payload["ha_tts_entity"] or "").strip()[:128]
+    if "ha_webhook_url" in payload:
+        url = str(payload["ha_webhook_url"] or "").strip()
+        if url and not (url.startswith("http://") or url.startswith("https://")):
+            errors.append("ha_webhook_url must start with http:// or https://")
+        else:
+            updates["ha_webhook_url"] = url[:2048]
+    if "ha_bearer_token" in payload:
+        updates["ha_bearer_token"] = str(payload["ha_bearer_token"] or "").strip()[:1024]
+    if "ha_webhook_secret" in payload:
+        updates["ha_webhook_secret"] = str(payload["ha_webhook_secret"] or "").strip()[:1024]
+
+    current_cfg = _settings_for_response()
+    effective_motion_voice_enabled = bool(updates.get("motion_voice_enabled", current_cfg.get("motion_voice_enabled", False)))
+    effective_direct_tts_enabled = bool(updates.get("ha_direct_tts_enabled", current_cfg.get("ha_direct_tts_enabled", True)))
+    effective_base_url = _normalize_ha_base_url(str(updates.get("ha_base_url", current_cfg.get("ha_base_url", ""))).strip())
+    effective_tts_entity = str(updates.get("ha_tts_entity", current_cfg.get("ha_tts_entity", ""))).strip()
+    effective_bearer_token = str(updates.get("ha_bearer_token", current_cfg.get("ha_bearer_token", ""))).strip()
+    effective_webhook_url = str(updates.get("ha_webhook_url", current_cfg.get("ha_webhook_url", ""))).strip()
+    if effective_motion_voice_enabled:
+        if effective_direct_tts_enabled:
+            if not effective_base_url:
+                errors.append("ha_base_url is required when direct Home Assistant TTS is enabled")
+            if not effective_bearer_token:
+                errors.append("ha_bearer_token is required when direct Home Assistant TTS is enabled")
+            if not effective_tts_entity:
+                errors.append("ha_tts_entity is required when direct Home Assistant TTS is enabled")
+        elif not effective_webhook_url:
+            errors.append("ha_webhook_url is required when webhook mode is selected")
 
     if errors:
         return jsonify({"ok": False, "errors": errors}), 400
@@ -1074,7 +1449,7 @@ def api_set_settings():
         settings.update(updates)
         if "rtsp_url" in updates and "streams" not in updates:
             if updates["rtsp_url"]:
-                settings["streams"] = [{"name": "Stream 1", "url": updates["rtsp_url"]}]
+                settings["streams"] = [{"name": "Stream 1", "url": updates["rtsp_url"], "motion_voice": False, "voice_entity": ""}]
                 settings["active_stream_index"] = 0
             else:
                 settings["streams"] = []
@@ -1403,9 +1778,21 @@ def admin_ui():
     }
     .stream-row {
       display: grid;
-      grid-template-columns: 0.8fr 1.8fr auto;
+      grid-template-columns: 0.8fr 1.2fr 1fr auto auto;
       gap: 8px;
       align-items: center;
+    }
+    .stream-voice-entity {
+      min-width: 0;
+    }
+    .stream-voice-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      font-weight: 600;
+      color: #334155;
+      white-space: nowrap;
     }
     .tiny {
       padding: 8px 10px;
@@ -1490,6 +1877,50 @@ def admin_ui():
         <label for="motion_audio_enabled" style="margin:0">Play Alert Audio On Motion</label>
       </div>
       <p style="margin: 6px 0 0; font-size: 12px; color: var(--muted);">Optional alert files: `server/cache/motion_alert.wav` or `server/cache/motion_alert_u8_16k.raw`.</p>
+      <div class="row toggle">
+        <input id="motion_voice_enabled" type="checkbox" />
+        <label for="motion_voice_enabled" style="margin:0">Home Assistant Voice Alerts Enabled</label>
+      </div>
+      <div class="row toggle">
+        <input id="ha_direct_tts_enabled" type="checkbox" />
+        <label for="ha_direct_tts_enabled" style="margin:0">Use Direct Home Assistant TTS (No YAML)</label>
+      </div>
+      <div class="row voice-mode-direct">
+        <label for="ha_base_url">Home Assistant URL</label>
+        <input id="ha_base_url" type="text" placeholder="http://homeassistant.local:8123" />
+      </div>
+      <div class="row">
+        <label for="ha_bearer_token">Home Assistant Bearer Token</label>
+        <input id="ha_bearer_token" type="text" placeholder="Long-lived access token" />
+      </div>
+      <div class="row voice-mode-direct">
+        <label for="ha_tts_entity">TTS Engine Entity</label>
+        <input id="ha_tts_entity" type="text" placeholder="tts.google_translate_en_com" />
+      </div>
+      <div class="row voice-mode-webhook">
+        <label for="ha_webhook_url">Webhook URL (fallback mode)</label>
+        <input id="ha_webhook_url" type="text" placeholder="http://homeassistant.local:8123/api/webhook/your_id" />
+      </div>
+      <div class="row voice-mode-webhook">
+        <label for="ha_webhook_secret">Webhook Secret Header (optional)</label>
+        <input id="ha_webhook_secret" type="text" placeholder="Sends as X-Webhook-Secret" />
+      </div>
+      <div class="row">
+        <label for="motion_voice_cooldown_ms">Voice Alert Cooldown (ms)</label>
+        <input id="motion_voice_cooldown_ms" type="number" min="1000" max="3600000" step="500" />
+      </div>
+      <div class="row">
+        <label for="motion_voice_message">Voice Message Template</label>
+        <input id="motion_voice_message" type="text" maxlength="240" placeholder="Motion detected on {stream_name}" />
+      </div>
+      <div class="row">
+        <label for="motion_voice_default_entity">Default Speaker Entity (optional)</label>
+        <input id="motion_voice_default_entity" type="text" maxlength="128" placeholder="media_player.library_pair" />
+      </div>
+      <p style="margin: 6px 0 0; font-size: 12px; color: var(--muted);">
+        Set per-stream voice alerts in the stream list below.
+        Direct TTS mode does not require Home Assistant YAML.
+      </p>
 
       <div class="actions">
         <button class="primary" id="save_btn">Apply Settings</button>
@@ -1508,6 +1939,7 @@ def admin_ui():
         <div><strong>Source:</strong> <span id="meta_source">-</span></div>
         <div><strong>Last frame:</strong> <span id="meta_frame">-</span></div>
         <div><strong>Motion:</strong> <span id="meta_motion">-</span></div>
+        <div><strong>Voice alert:</strong> <span id="meta_voice_alert">-</span></div>
         <div><strong>Last error:</strong> <span id="meta_error">-</span></div>
       </div>
     </section>
@@ -1655,6 +2087,15 @@ def admin_ui():
       webflashStatus.textContent = msg;
       webflashStatus.className = "status " + (mode || "");
     }
+    function updateVoiceModeVisibility() {
+      const directEnabled = !!document.getElementById("ha_direct_tts_enabled").checked;
+      document.querySelectorAll(".voice-mode-direct").forEach((el) => {
+        el.style.display = directEnabled ? "" : "none";
+      });
+      document.querySelectorAll(".voice-mode-webhook").forEach((el) => {
+        el.style.display = directEnabled ? "none" : "";
+      });
+    }
 
     let isDirty = false;
     const streamListEl = document.getElementById("stream_list");
@@ -1665,8 +2106,15 @@ def admin_ui():
       document.querySelectorAll(".stream-row").forEach((row) => {
         const name = (row.querySelector(".stream-name").value || "").trim();
         const url = (row.querySelector(".stream-url").value || "").trim();
+        const motionVoice = !!row.querySelector(".stream-motion-voice").checked;
+        const voiceEntity = (row.querySelector(".stream-voice-entity").value || "").trim();
         if (url) {
-          rows.push({ name: name || `Stream ${rows.length + 1}`, url });
+          rows.push({
+            name: name || `Stream ${rows.length + 1}`,
+            url,
+            motion_voice: motionVoice,
+            voice_entity: voiceEntity,
+          });
         }
       });
       return rows;
@@ -1678,7 +2126,10 @@ def admin_ui():
       streams.forEach((stream, i) => {
         const opt = document.createElement("option");
         opt.value = String(i);
-        opt.textContent = `${i + 1}. ${stream.name}`;
+        const route = stream.motion_voice
+          ? (stream.voice_entity ? `[voice:${stream.voice_entity}]` : "[voice:default]")
+          : "";
+        opt.textContent = `${i + 1}. ${stream.name} ${route}`;
         activeStreamEl.appendChild(opt);
       });
       if (streams.length > 0) {
@@ -1693,6 +2144,8 @@ def admin_ui():
       row.innerHTML = `
         <input class="stream-name" type="text" maxlength="64" placeholder="Name" value="${(stream.name || "").replace(/"/g, "&quot;")}" />
         <input class="stream-url" type="text" placeholder="rtsp://..." value="${(stream.url || "").replace(/"/g, "&quot;")}" />
+        <input class="stream-voice-entity" type="text" maxlength="128" placeholder="media_player.entity (optional)" value="${(stream.voice_entity || "").replace(/"/g, "&quot;")}" />
+        <label class="stream-voice-toggle"><input class="stream-motion-voice" type="checkbox" ${stream.motion_voice ? "checked" : ""} /> Voice</label>
         <button type="button" class="secondary tiny remove-stream-btn">Remove</button>
       `;
       streamListEl.appendChild(row);
@@ -1705,7 +2158,7 @@ def admin_ui():
       streamListEl.innerHTML = "";
       (streams || []).forEach((s) => addStreamRow(s, false));
       if ((streams || []).length === 0) {
-        addStreamRow({ name: "Stream 1", url: "" }, false);
+        addStreamRow({ name: "Stream 1", url: "", motion_voice: false, voice_entity: "" }, false);
       }
       refreshActiveStreamOptions(activeIndex || 0);
     }
@@ -1725,6 +2178,17 @@ def admin_ui():
       document.getElementById("motion_threshold").value = (s.motion_threshold ?? 2.5);
       document.getElementById("motion_hold_ms").value = (s.motion_hold_ms ?? 4000);
       document.getElementById("motion_audio_enabled").checked = (s.motion_audio_enabled ?? true);
+      document.getElementById("motion_voice_enabled").checked = !!s.motion_voice_enabled;
+      document.getElementById("motion_voice_cooldown_ms").value = (s.motion_voice_cooldown_ms ?? 30000);
+      document.getElementById("motion_voice_message").value = (s.motion_voice_message ?? "Motion detected on {stream_name}");
+      document.getElementById("motion_voice_default_entity").value = (s.motion_voice_default_entity || "media_player.library_pair");
+      document.getElementById("ha_direct_tts_enabled").checked = (s.ha_direct_tts_enabled ?? true);
+      document.getElementById("ha_base_url").value = (s.ha_base_url ?? "");
+      document.getElementById("ha_tts_entity").value = (s.ha_tts_entity || "tts.google_translate_en_com");
+      document.getElementById("ha_webhook_url").value = (s.ha_webhook_url ?? "");
+      document.getElementById("ha_bearer_token").value = (s.ha_bearer_token ?? "");
+      document.getElementById("ha_webhook_secret").value = (s.ha_webhook_secret ?? "");
+      updateVoiceModeVisibility();
       setStreams(s.streams || [], s.active_stream_index || 0);
     }
 
@@ -1738,6 +2202,16 @@ def admin_ui():
         document.getElementById("meta_motion").textContent = `detected (${(st.motion_ratio || 0).toFixed(2)}%)`;
       } else {
         document.getElementById("meta_motion").textContent = "idle";
+      }
+      const voiceErr = st.motion_voice_last_error || "";
+      if (voiceErr) {
+        document.getElementById("meta_voice_alert").textContent = `error: ${voiceErr}`;
+      } else if (st.motion_voice_last_sent_ms) {
+        const streamLabel = st.motion_voice_last_stream_name || `#${Number(st.motion_voice_last_stream_idx || 0) + 1}`;
+        const speaker = st.motion_voice_last_speaker_entity || "default";
+        document.getElementById("meta_voice_alert").textContent = `sent to ${streamLabel} -> ${speaker} @ ${new Date(st.motion_voice_last_sent_ms).toLocaleTimeString()}`;
+      } else {
+        document.getElementById("meta_voice_alert").textContent = "idle";
       }
       if (st.last_frame_ms) {
         document.getElementById("meta_frame").textContent = new Date(st.last_frame_ms).toLocaleTimeString();
@@ -1783,7 +2257,17 @@ def admin_ui():
         motion_enabled: document.getElementById("motion_enabled").checked,
         motion_threshold: Number(document.getElementById("motion_threshold").value),
         motion_hold_ms: Number(document.getElementById("motion_hold_ms").value),
-        motion_audio_enabled: document.getElementById("motion_audio_enabled").checked
+        motion_audio_enabled: document.getElementById("motion_audio_enabled").checked,
+        motion_voice_enabled: document.getElementById("motion_voice_enabled").checked,
+        motion_voice_cooldown_ms: Number(document.getElementById("motion_voice_cooldown_ms").value),
+        motion_voice_message: document.getElementById("motion_voice_message").value.trim(),
+        motion_voice_default_entity: document.getElementById("motion_voice_default_entity").value.trim(),
+        ha_direct_tts_enabled: document.getElementById("ha_direct_tts_enabled").checked,
+        ha_base_url: document.getElementById("ha_base_url").value.trim(),
+        ha_tts_entity: document.getElementById("ha_tts_entity").value.trim(),
+        ha_webhook_url: document.getElementById("ha_webhook_url").value.trim(),
+        ha_bearer_token: document.getElementById("ha_bearer_token").value.trim(),
+        ha_webhook_secret: document.getElementById("ha_webhook_secret").value.trim()
       };
       const res = await fetch(withCid("/api/settings"), {
         method: "POST",
@@ -1831,8 +2315,12 @@ def admin_ui():
     document.getElementById("refresh_btn").addEventListener("click", loadSettings);
     document.getElementById("preset_fps_btn").addEventListener("click", () => applyPreset("max_fps"));
     document.getElementById("preset_quality_btn").addEventListener("click", () => applyPreset("best_quality"));
+    document.getElementById("ha_direct_tts_enabled").addEventListener("change", () => {
+      updateVoiceModeVisibility();
+      isDirty = true;
+    });
     document.getElementById("add_stream_btn").addEventListener("click", () => {
-      addStreamRow({ name: `Stream ${document.querySelectorAll(".stream-row").length + 1}`, url: "" }, true);
+      addStreamRow({ name: `Stream ${document.querySelectorAll(".stream-row").length + 1}`, url: "", motion_voice: false, voice_entity: "" }, true);
       isDirty = true;
     });
     streamListEl.addEventListener("click", (e) => {
@@ -1843,6 +2331,12 @@ def admin_ui():
           refreshActiveStreamOptions(activeStreamEl.value || 0);
           isDirty = true;
         }
+      }
+    });
+    streamListEl.addEventListener("change", (e) => {
+      if (e.target && e.target.classList.contains("stream-motion-voice")) {
+        refreshActiveStreamOptions(activeStreamEl.value || 0);
+        isDirty = true;
       }
     });
     activeStreamEl.addEventListener("change", () => {
@@ -1864,7 +2358,7 @@ def admin_ui():
     });
     document.addEventListener("input", (e) => {
       if (!e.target) return;
-      if (e.target.classList && (e.target.classList.contains("stream-name") || e.target.classList.contains("stream-url"))) {
+      if (e.target.classList && (e.target.classList.contains("stream-name") || e.target.classList.contains("stream-url") || e.target.classList.contains("stream-voice-entity"))) {
         if (e.target.classList.contains("stream-url")) {
           const rows = Array.from(document.querySelectorAll(".stream-row"));
           const row = e.target.closest(".stream-row");
