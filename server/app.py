@@ -2070,6 +2070,7 @@ def admin_ui():
       display: grid;
       grid-template-columns: 1.1fr 1fr;
       gap: 18px;
+      align-items: start;
     }
     .card {
       background: var(--panel);
@@ -2077,6 +2078,26 @@ def admin_ui():
       padding: 18px;
       box-shadow: 0 18px 40px rgba(0,0,0,0.25);
       backdrop-filter: blur(6px);
+    }
+    .page-head {
+      display: grid;
+      gap: 12px;
+      background: rgba(255,255,255,0.9);
+    }
+    .page-copy {
+      display: grid;
+      gap: 6px;
+    }
+    .column-stack {
+      display: grid;
+      gap: 18px;
+      align-content: start;
+    }
+    .main-stack {
+      grid-column: 1;
+    }
+    .side-stack {
+      grid-column: 2;
     }
     h1 {
       margin: 0 0 6px;
@@ -2086,6 +2107,17 @@ def admin_ui():
     p { margin: 0 0 14px; color: var(--muted); }
     .row { margin: 10px 0; }
     label { display:block; font-weight: 700; margin-bottom: 6px; font-size: 14px; }
+    .field-head {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 6px;
+    }
+    .field-head label {
+      margin: 0;
+      flex: 1;
+      min-width: 0;
+    }
     input[type="text"], input[type="number"], input[type="range"], select {
       width: 100%;
     }
@@ -2108,6 +2140,7 @@ def admin_ui():
       display: flex;
       gap: 8px;
       margin-top: 14px;
+      flex-wrap: wrap;
     }
     button {
       border: 0;
@@ -2128,6 +2161,165 @@ def admin_ui():
     .status.ok { color: var(--ok); }
     .status.warn { color: var(--warn); }
     .status.err { color: var(--error); }
+    .section-card {
+      position: relative;
+      overflow: hidden;
+      padding: 16px;
+      border: 1px solid rgba(255,255,255,0.35);
+    }
+    .section-card::before {
+      content: "";
+      position: absolute;
+      inset: 0 0 auto 0;
+      height: 4px;
+      background: linear-gradient(90deg, var(--section-accent, #0d8fdf), transparent 70%);
+      opacity: 0.9;
+    }
+    .streams-card { --section-accent: #2f7dbd; background: rgba(239,247,255,0.92); }
+    .feeds-card { --section-accent: #2563eb; background: rgba(242,247,255,0.92); }
+    .image-card { --section-accent: #b97a1f; background: rgba(255,249,237,0.94); }
+    .status-card { --section-accent: #64748b; background: rgba(247,250,252,0.94); }
+    .motion-card { --section-accent: #0f766e; background: rgba(239,251,248,0.94); }
+    .voice-card { --section-accent: #c4634f; background: rgba(255,245,241,0.94); }
+    .firmware-card { --section-accent: #475569; background: rgba(243,246,250,0.94); }
+    .subsection-card {
+      margin-top: 14px;
+      background: rgba(255,255,255,0.65);
+      box-shadow: none;
+      border: 1px solid rgba(209, 219, 231, 0.9);
+      padding: 14px;
+    }
+    .subsection-card::before {
+      height: 3px;
+      opacity: 0.7;
+    }
+    .group-head {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+    }
+    .group-toggle {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      background: transparent;
+      color: inherit;
+      padding: 0;
+      text-align: left;
+    }
+    .group-copy {
+      display: grid;
+      gap: 3px;
+      min-width: 0;
+    }
+    .group-kicker {
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      font-weight: 800;
+      color: var(--section-accent, #0d8fdf);
+    }
+    .group-title {
+      font-size: 18px;
+      font-weight: 800;
+      color: #17263b;
+    }
+    .group-summary {
+      font-size: 12px;
+      line-height: 1.45;
+      color: #5a697c;
+    }
+    .group-chevron {
+      width: 12px;
+      height: 12px;
+      border-right: 2px solid currentColor;
+      border-bottom: 2px solid currentColor;
+      transform: rotate(45deg);
+      transition: transform 0.18s ease;
+      color: #4b5b71;
+      flex: 0 0 auto;
+      margin-right: 4px;
+    }
+    .section-card.is-open > .group-head .group-chevron {
+      transform: rotate(225deg);
+      margin-top: 6px;
+    }
+    .info-btn {
+      width: 34px;
+      height: 34px;
+      border-radius: 999px;
+      padding: 0;
+      background: rgba(255,255,255,0.78);
+      color: var(--section-accent, #0d8fdf);
+      border: 1px solid rgba(209, 219, 231, 0.9);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.9);
+      font-size: 14px;
+      font-weight: 800;
+      flex: 0 0 auto;
+    }
+    .mini-info {
+      width: 22px;
+      height: 22px;
+      font-size: 11px;
+      border-radius: 999px;
+      padding: 0;
+    }
+    .section-body {
+      margin-top: 14px;
+      max-height: 0;
+      opacity: 0;
+      overflow: hidden;
+      pointer-events: none;
+      transition: max-height 0.24s ease, opacity 0.18s ease;
+    }
+    .section-card.is-open > .section-body {
+      max-height: 5000px;
+      opacity: 1;
+      overflow: visible;
+      pointer-events: auto;
+    }
+    .help-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(9, 17, 29, 0.45);
+      display: grid;
+      place-items: center;
+      padding: 20px;
+      z-index: 40;
+    }
+    .help-overlay[hidden] {
+      display: none !important;
+    }
+    .help-modal {
+      width: min(560px, 100%);
+      background: rgba(255,255,255,0.97);
+      color: var(--ink);
+      border-radius: 18px;
+      padding: 18px;
+      box-shadow: 0 24px 60px rgba(0,0,0,0.28);
+      border: 1px solid rgba(214, 222, 234, 0.95);
+    }
+    .help-modal-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+    .help-title {
+      font-size: 20px;
+      font-weight: 800;
+      color: #17263b;
+    }
+    .help-body {
+      display: grid;
+      gap: 10px;
+      font-size: 14px;
+      line-height: 1.55;
+      color: #405064;
+    }
     .preview {
       width: 100%;
       aspect-ratio: 4 / 3;
@@ -2213,6 +2405,13 @@ def admin_ui():
     }
     @media (max-width: 900px) {
       .wrap { grid-template-columns: 1fr; }
+      .main-stack,
+      .side-stack {
+        grid-column: auto;
+      }
+      .group-head {
+        align-items: stretch;
+      }
     }
     .span-2 { grid-column: 1 / -1; }
     .mono {
@@ -2277,273 +2476,442 @@ def admin_ui():
 <body>
   <script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
   <div class="wrap">
-    <section class="card">
-      <h1>CYD Stream Control</h1>
-      <div class="pill">Version {{ app_version }}</div>
-      <p>Update URL and image tuning live. Changes are applied immediately.</p>
-
-      <div class="row">
-        <label for="rtsp_url">RTSP URL</label>
-        <input id="rtsp_url" type="text" placeholder="rtsp://user:pass@ip:port/path" />
+    <section class="card page-head span-2">
+      <div class="page-copy">
+        <h1>CYD Stream Control</h1>
+        <div class="pill">Version {{ app_version }}</div>
+        <p>Controls are grouped into collapsible cards. Open only the section you need, then apply all changes when you are ready.</p>
       </div>
-      <div class="row">
-        <label for="active_stream_index">Saved Streams</label>
-        <select id="active_stream_index"></select>
-      </div>
-      <div id="stream_list" class="stream-list"></div>
       <div class="actions">
-        <button class="secondary" id="add_stream_btn">Add Stream</button>
-      </div>
-
-      <div class="row">
-        <label for="jpeg_quality">JPEG Quality</label>
-        <div class="inline">
-          <input id="jpeg_quality" type="range" min="40" max="95" step="1" />
-          <input id="jpeg_quality_num" type="number" min="40" max="95" step="1" />
-        </div>
-      </div>
-
-      <div class="row">
-        <label for="contrast">Contrast</label>
-        <div class="inline">
-          <input id="contrast" type="range" min="0.6" max="1.8" step="0.01" />
-          <input id="contrast_num" type="number" min="0.6" max="1.8" step="0.01" />
-        </div>
-      </div>
-
-      <div class="row">
-        <label for="brightness">Brightness</label>
-        <div class="inline">
-          <input id="brightness" type="range" min="-40" max="40" step="1" />
-          <input id="brightness_num" type="number" min="-40" max="40" step="1" />
-        </div>
-      </div>
-
-      <div class="row">
-        <label for="saturation">Saturation</label>
-        <div class="inline">
-          <input id="saturation" type="range" min="0.6" max="1.8" step="0.01" />
-          <input id="saturation_num" type="number" min="0.6" max="1.8" step="0.01" />
-        </div>
-      </div>
-
-      <div class="row toggle">
-        <input id="swap_rb" type="checkbox" />
-        <label for="swap_rb" style="margin:0">Swap Red/Blue Channels</label>
-      </div>
-      <div class="row toggle">
-        <input id="motion_enabled" type="checkbox" />
-        <label for="motion_enabled" style="margin:0">Motion Detection Enabled</label>
-      </div>
-      <div class="row">
-        <label for="motion_threshold">Motion Threshold (%)</label>
-        <input id="motion_threshold" type="number" min="0.1" max="50" step="0.1" />
-      </div>
-      <div class="row">
-        <label for="motion_hold_ms">Motion Hold (ms)</label>
-        <input id="motion_hold_ms" type="number" min="200" max="60000" step="100" />
-      </div>
-      <p style="margin: 8px 0 4px; font-size: 12px; color: var(--muted);">Advanced motion detector tuning (applies live).</p>
-      <div class="row">
-        <label for="motion_detect_width">Detection Width</label>
-        <input id="motion_detect_width" type="number" min="64" max="640" step="1" />
-      </div>
-      <div class="row">
-        <label for="motion_detect_height">Detection Height</label>
-        <input id="motion_detect_height" type="number" min="48" max="480" step="1" />
-      </div>
-      <div class="row">
-        <label for="motion_bg_history">Background History</label>
-        <input id="motion_bg_history" type="number" min="10" max="2000" step="1" />
-      </div>
-      <div class="row">
-        <label for="motion_bg_var_threshold">Background Threshold</label>
-        <input id="motion_bg_var_threshold" type="number" min="4" max="255" step="0.1" />
-      </div>
-      <div class="row">
-        <label for="motion_bg_learning_rate">Background Learning Rate</label>
-        <input id="motion_bg_learning_rate" type="number" min="0" max="1" step="0.001" />
-      </div>
-      <div class="row">
-        <label for="motion_min_contour_area_pct">Minimum Blob Area (%)</label>
-        <input id="motion_min_contour_area_pct" type="number" min="0.001" max="20" step="0.001" />
-      </div>
-      <div class="row">
-        <label for="motion_warmup_frames">Warm-up Frames</label>
-        <input id="motion_warmup_frames" type="number" min="0" max="600" step="1" />
-      </div>
-      <div class="row toggle">
-        <input id="motion_audio_enabled" type="checkbox" />
-        <label for="motion_audio_enabled" style="margin:0">Play Alert Audio On Motion</label>
-      </div>
-      <p style="margin: 6px 0 0; font-size: 12px; color: var(--muted);">Optional alert files: `server/cache/motion_alert.wav` or `server/cache/motion_alert_u8_16k.raw`.</p>
-      <div class="row toggle">
-        <input id="motion_voice_enabled" type="checkbox" />
-        <label for="motion_voice_enabled" style="margin:0">Home Assistant Voice Alerts Enabled</label>
-      </div>
-      <div class="row toggle">
-        <input id="motion_voice_daytime_only" type="checkbox" />
-        <label for="motion_voice_daytime_only" style="margin:0">Voice Alerts Daytime Only</label>
-      </div>
-      <div class="row">
-        <label for="motion_voice_start_hour">Daytime Start Hour (0-23)</label>
-        <input id="motion_voice_start_hour" type="number" min="0" max="23" step="1" />
-      </div>
-      <div class="row">
-        <label for="motion_voice_end_hour">Daytime End Hour (0-23)</label>
-        <input id="motion_voice_end_hour" type="number" min="0" max="23" step="1" />
-      </div>
-      <div class="row toggle">
-        <input id="ha_direct_tts_enabled" type="checkbox" />
-        <label for="ha_direct_tts_enabled" style="margin:0">Use Direct Home Assistant TTS (No YAML)</label>
-      </div>
-      <div class="row voice-mode-direct">
-        <label for="ha_base_url">Home Assistant URL</label>
-        <input id="ha_base_url" type="text" placeholder="http://homeassistant.local:8123" />
-      </div>
-      <div class="row">
-        <label for="ha_bearer_token">Home Assistant Bearer Token</label>
-        <input id="ha_bearer_token" type="text" placeholder="Long-lived access token" />
-      </div>
-      <div class="row voice-mode-direct">
-        <label for="ha_tts_entity">TTS Engine Entity</label>
-        <input id="ha_tts_entity" type="text" placeholder="tts.google_translate_en_com" />
-      </div>
-      <div class="row voice-mode-webhook">
-        <label for="ha_webhook_url">Webhook URL (fallback mode)</label>
-        <input id="ha_webhook_url" type="text" placeholder="http://homeassistant.local:8123/api/webhook/your_id" />
-      </div>
-      <div class="row voice-mode-webhook">
-        <label for="ha_webhook_secret">Webhook Secret Header (optional)</label>
-        <input id="ha_webhook_secret" type="text" placeholder="Sends as X-Webhook-Secret" />
-      </div>
-      <div class="row">
-        <label for="motion_voice_cooldown_ms">Voice Alert Cooldown (ms)</label>
-        <input id="motion_voice_cooldown_ms" type="number" min="1000" max="3600000" step="500" />
-      </div>
-      <div class="row">
-        <label for="motion_voice_message">Voice Message Template</label>
-        <input id="motion_voice_message" type="text" maxlength="240" placeholder="Motion detected on {stream_name}" />
-      </div>
-      <div class="row">
-        <label for="motion_voice_default_entity">Default Speaker Entity (optional)</label>
-        <input id="motion_voice_default_entity" type="text" maxlength="128" placeholder="media_player.library_pair" />
-      </div>
-      <p style="margin: 6px 0 0; font-size: 12px; color: var(--muted);">
-        Set per-stream voice alerts in the stream list below.
-        Direct TTS mode does not require Home Assistant YAML.
-        Daytime window uses the server's local timezone.
-      </p>
-
-      <div class="actions">
-        <button class="primary" id="save_btn">Apply Settings</button>
+        <button class="primary" id="save_btn">Apply All Changes</button>
         <button class="secondary" id="refresh_btn">Reload Current</button>
-        <button class="secondary" id="preset_fps_btn">Preset: Max FPS</button>
-        <button class="secondary" id="preset_quality_btn">Preset: Best Quality</button>
       </div>
       <div id="status_box" class="status">Loading…</div>
     </section>
 
-    <section class="card">
-      <div class="all-feeds-box">
-        <label style="margin:0">All Saved Feeds</label>
-        <div id="all_feeds_grid" class="all-feeds-grid"></div>
+    <div class="column-stack main-stack">
+    <section class="card section-card streams-card is-open" data-section="streams">
+      <div class="group-head">
+        <button type="button" class="group-toggle" data-toggle-section="streams" aria-expanded="true">
+          <span class="group-copy">
+            <span class="group-kicker">Streams</span>
+            <span class="group-title">Source Selection</span>
+            <span class="group-summary">Add, rename, and switch the feeds available to this browser.</span>
+          </span>
+          <span class="group-chevron" aria-hidden="true"></span>
+        </button>
+        <button type="button" class="info-btn" data-help-key="streams" aria-label="About streams">i</button>
+      </div>
+      <div class="section-body">
+        <div class="row">
+          <label for="rtsp_url">Current Stream URL</label>
+          <input id="rtsp_url" type="text" placeholder="rtsp://user:pass@ip:port/path" />
+        </div>
+        <div class="row">
+          <label for="active_stream_index">Saved Streams</label>
+          <select id="active_stream_index"></select>
+        </div>
+        <div id="stream_list" class="stream-list"></div>
+        <div class="actions">
+          <button class="secondary" id="add_stream_btn">Add Stream</button>
+        </div>
       </div>
     </section>
 
-    <section class="card span-2">
-      <div class="pill">Firmware Flasher</div>
-      <p>Build and flash firmware directly from this server.</p>
-      <div class="firm-grid">
+    <section class="card section-card image-card" data-section="image">
+      <div class="group-head">
+        <button type="button" class="group-toggle" data-toggle-section="image" aria-expanded="false">
+          <span class="group-copy">
+            <span class="group-kicker">Image</span>
+            <span class="group-title">Display Tuning</span>
+            <span class="group-summary">Adjust picture quality, color balance, and quick display presets.</span>
+          </span>
+          <span class="group-chevron" aria-hidden="true"></span>
+        </button>
+        <button type="button" class="info-btn" data-help-key="image" aria-label="About image tuning">i</button>
+      </div>
+      <div class="section-body">
         <div class="row">
-          <label for="fw_board">Board</label>
-          <select id="fw_board">
-            <option value="cyd">Cheap Yellow Display (ESP32-2432S028R)</option>
-            <option value="ttgo_tdisplay">TTGO T-Display</option>
-            <option value="esp32_s3_2p8">ESP32-S3 2.8&quot; 240x320</option>
-          </select>
+          <label for="jpeg_quality">JPEG Quality</label>
+          <div class="inline">
+            <input id="jpeg_quality" type="range" min="40" max="95" step="1" />
+            <input id="jpeg_quality_num" type="number" min="40" max="95" step="1" />
+          </div>
         </div>
         <div class="row">
-          <label for="fw_flavor">Firmware Flavor</label>
-          <select id="fw_flavor">
-            <option value="audio_on">Audio On</option>
-            <option value="no_audio">Audio Off (Higher FPS)</option>
-          </select>
+          <label for="contrast">Contrast</label>
+          <div class="inline">
+            <input id="contrast" type="range" min="0.6" max="1.8" step="0.01" />
+            <input id="contrast_num" type="number" min="0.6" max="1.8" step="0.01" />
+          </div>
         </div>
         <div class="row">
-          <label for="fw_upload_port">USB Port (optional)</label>
-          <input id="fw_upload_port" type="text" placeholder="/dev/cu.usbserial-1110" />
+          <label for="brightness">Brightness</label>
+          <div class="inline">
+            <input id="brightness" type="range" min="-40" max="40" step="1" />
+            <input id="brightness_num" type="number" min="-40" max="40" step="1" />
+          </div>
         </div>
         <div class="row">
-          <label for="fw_ssid">Wi-Fi SSID</label>
-          <input id="fw_ssid" type="text" placeholder="Your Wi-Fi name" value="Homelan" />
+          <label for="saturation">Saturation</label>
+          <div class="inline">
+            <input id="saturation" type="range" min="0.6" max="1.8" step="0.01" />
+            <input id="saturation_num" type="number" min="0.6" max="1.8" step="0.01" />
+          </div>
         </div>
-        <div class="row">
-          <label for="fw_password">Wi-Fi Password</label>
-          <input id="fw_password" type="text" placeholder="Your Wi-Fi password" />
+        <div class="row toggle">
+          <input id="swap_rb" type="checkbox" />
+          <label for="swap_rb" style="margin:0">Swap Red/Blue Channels</label>
         </div>
-        <div class="row">
-          <label for="fw_server_host">Server Host/IP</label>
-          <input id="fw_server_host" type="text" placeholder="192.168.1.16" />
-        </div>
-        <div class="row">
-          <label for="fw_server_port">Server Port</label>
-          <input id="fw_server_port" type="number" min="1" max="65535" step="1" value="8124" />
+        <div class="actions">
+          <button class="secondary" id="preset_fps_btn">Preset: Max FPS</button>
+          <button class="secondary" id="preset_quality_btn">Preset: Best Quality</button>
         </div>
       </div>
-      <div class="actions">
-        <button class="primary" id="flash_btn">Build + Flash Device</button>
-        <button class="secondary" id="refresh_flash_btn">Refresh Flash Status</button>
+    </section>
+
+    <section class="card section-card status-card is-open" data-section="status">
+      <div class="group-head">
+        <button type="button" class="group-toggle" data-toggle-section="status" aria-expanded="true">
+          <span class="group-copy">
+            <span class="group-kicker">System</span>
+            <span class="group-title">Live Status</span>
+            <span class="group-summary">The current state of this browser session and the active server stream.</span>
+          </span>
+          <span class="group-chevron" aria-hidden="true"></span>
+        </button>
+        <button type="button" class="info-btn" data-help-key="status" aria-label="About system status">i</button>
       </div>
-      <div id="flash_status_box" class="status">Idle</div>
-      <div id="flash_ports" class="meta"></div>
-      <div id="flash_log" class="mono"></div>
-      <div class="row" style="margin-top: 16px;">
-        <label>Browser USB Flash (works with container deployments)</label>
-        <p style="margin: 0 0 8px; color: var(--muted);">
-          Use Chrome/Edge on the device physically connected to CYD via USB.
+      <div class="section-body">
+        <div class="meta">
+          <div><strong>Stream State:</strong> <span id="runtime_status_state">-</span></div>
+          <div><strong>Selected Stream:</strong> <span id="runtime_status_stream">-</span></div>
+          <div><strong>Current Source:</strong> <span id="runtime_status_source">-</span></div>
+          <div><strong>Last Frame:</strong> <span id="runtime_status_frame">-</span></div>
+          <div><strong>Motion:</strong> <span id="runtime_status_motion">-</span></div>
+          <div><strong>Last Error:</strong> <span id="runtime_status_error">-</span></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="card section-card motion-card" data-section="motion">
+      <div class="group-head">
+        <button type="button" class="group-toggle" data-toggle-section="motion" aria-expanded="false">
+          <span class="group-copy">
+            <span class="group-kicker">Motion</span>
+            <span class="group-title">Detection Rules</span>
+            <span class="group-summary">Set how easily movement is detected, and whether audio alerts should play.</span>
+          </span>
+          <span class="group-chevron" aria-hidden="true"></span>
+        </button>
+        <button type="button" class="info-btn" data-help-key="motion" aria-label="About motion detection">i</button>
+      </div>
+      <div class="section-body">
+        <div class="row toggle">
+          <input id="motion_enabled" type="checkbox" />
+          <label for="motion_enabled" style="margin:0">Motion Detection Enabled</label>
+        </div>
+        <div class="row">
+          <label for="motion_threshold">Motion Threshold (%)</label>
+          <input id="motion_threshold" type="number" min="0.1" max="50" step="0.1" />
+        </div>
+        <div class="row">
+          <label for="motion_hold_ms">Motion Hold (ms)</label>
+          <input id="motion_hold_ms" type="number" min="200" max="60000" step="100" />
+        </div>
+        <div class="row toggle">
+          <input id="motion_audio_enabled" type="checkbox" />
+          <label for="motion_audio_enabled" style="margin:0">Play Alert Audio On Motion</label>
+        </div>
+        <p style="margin: 6px 0 0; font-size: 12px; color: var(--muted);">Optional alert files: `server/cache/motion_alert.wav` or `server/cache/motion_alert_u8_16k.raw`.</p>
+
+        <div class="subsection-card section-card" data-section="motion-advanced">
+          <div class="group-head">
+            <button type="button" class="group-toggle" data-toggle-section="motion-advanced" aria-expanded="false">
+              <span class="group-copy">
+                <span class="group-kicker">Advanced</span>
+                <span class="group-title">Detector Tuning</span>
+                <span class="group-summary">Most users can leave these alone. Change only if you need less noise or faster reaction.</span>
+              </span>
+              <span class="group-chevron" aria-hidden="true"></span>
+            </button>
+            <button type="button" class="info-btn" data-help-key="motion-advanced" aria-label="About advanced motion settings">i</button>
+          </div>
+          <div class="section-body">
+            <div class="row">
+              <div class="field-head">
+                <label for="motion_detect_width">Detection Width</label>
+                <button type="button" class="info-btn mini-info" data-help-key="motion_detect_width_field" aria-label="About detection width">i</button>
+              </div>
+              <input id="motion_detect_width" type="number" min="64" max="640" step="1" />
+            </div>
+            <div class="row">
+              <div class="field-head">
+                <label for="motion_detect_height">Detection Height</label>
+                <button type="button" class="info-btn mini-info" data-help-key="motion_detect_height_field" aria-label="About detection height">i</button>
+              </div>
+              <input id="motion_detect_height" type="number" min="48" max="480" step="1" />
+            </div>
+            <div class="row">
+              <div class="field-head">
+                <label for="motion_bg_history">Background History</label>
+                <button type="button" class="info-btn mini-info" data-help-key="motion_bg_history_field" aria-label="About background history">i</button>
+              </div>
+              <input id="motion_bg_history" type="number" min="10" max="2000" step="1" />
+            </div>
+            <div class="row">
+              <div class="field-head">
+                <label for="motion_bg_var_threshold">Sensitivity To Scene Changes</label>
+                <button type="button" class="info-btn mini-info" data-help-key="motion_bg_var_threshold_field" aria-label="About sensitivity to scene changes">i</button>
+              </div>
+              <input id="motion_bg_var_threshold" type="number" min="4" max="255" step="0.1" />
+            </div>
+            <div class="row">
+              <div class="field-head">
+                <label for="motion_bg_learning_rate">Background Adaptation Speed</label>
+                <button type="button" class="info-btn mini-info" data-help-key="motion_bg_learning_rate_field" aria-label="About background adaptation speed">i</button>
+              </div>
+              <input id="motion_bg_learning_rate" type="number" min="0" max="1" step="0.001" />
+            </div>
+            <div class="row">
+              <div class="field-head">
+                <label for="motion_min_contour_area_pct">Minimum Movement Size (%)</label>
+                <button type="button" class="info-btn mini-info" data-help-key="motion_min_contour_area_pct_field" aria-label="About minimum movement size">i</button>
+              </div>
+              <input id="motion_min_contour_area_pct" type="number" min="0.001" max="20" step="0.001" />
+            </div>
+            <div class="row">
+              <div class="field-head">
+                <label for="motion_warmup_frames">Startup Stabilization (frames)</label>
+                <button type="button" class="info-btn mini-info" data-help-key="motion_warmup_frames_field" aria-label="About startup stabilization">i</button>
+              </div>
+              <input id="motion_warmup_frames" type="number" min="0" max="600" step="1" />
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="card section-card voice-card" data-section="voice">
+      <div class="group-head">
+        <button type="button" class="group-toggle" data-toggle-section="voice" aria-expanded="false">
+          <span class="group-copy">
+            <span class="group-kicker">Voice</span>
+            <span class="group-title">Alerts & Home Assistant</span>
+            <span class="group-summary">Control spoken alerts, timing rules, and Home Assistant delivery settings.</span>
+          </span>
+          <span class="group-chevron" aria-hidden="true"></span>
+        </button>
+        <button type="button" class="info-btn" data-help-key="voice" aria-label="About voice alerts">i</button>
+      </div>
+      <div class="section-body">
+        <div class="row toggle">
+          <input id="motion_voice_enabled" type="checkbox" />
+          <label for="motion_voice_enabled" style="margin:0">Home Assistant Voice Alerts Enabled</label>
+        </div>
+        <div class="row toggle">
+          <input id="motion_voice_daytime_only" type="checkbox" />
+          <label for="motion_voice_daytime_only" style="margin:0">Voice Alerts Daytime Only</label>
+        </div>
+        <div class="row">
+          <label for="motion_voice_start_hour">Daytime Start Hour (0-23)</label>
+          <input id="motion_voice_start_hour" type="number" min="0" max="23" step="1" />
+        </div>
+        <div class="row">
+          <label for="motion_voice_end_hour">Daytime End Hour (0-23)</label>
+          <input id="motion_voice_end_hour" type="number" min="0" max="23" step="1" />
+        </div>
+        <div class="row">
+          <label for="motion_voice_cooldown_ms">Voice Alert Cooldown (ms)</label>
+          <input id="motion_voice_cooldown_ms" type="number" min="1000" max="3600000" step="500" />
+        </div>
+        <div class="row">
+          <label for="motion_voice_message">Voice Message Template</label>
+          <input id="motion_voice_message" type="text" maxlength="240" placeholder="Motion detected on {stream_name}" />
+        </div>
+        <div class="row">
+          <label for="motion_voice_default_entity">Default Speaker Entity (optional)</label>
+          <input id="motion_voice_default_entity" type="text" maxlength="128" placeholder="media_player.library_pair" />
+        </div>
+        <div class="row toggle">
+          <input id="ha_direct_tts_enabled" type="checkbox" />
+          <label for="ha_direct_tts_enabled" style="margin:0">Use Direct Home Assistant TTS (No YAML)</label>
+        </div>
+        <div class="row voice-mode-direct">
+          <label for="ha_base_url">Home Assistant URL</label>
+          <input id="ha_base_url" type="text" placeholder="http://homeassistant.local:8123" />
+        </div>
+        <div class="row">
+          <label for="ha_bearer_token">Home Assistant Bearer Token</label>
+          <input id="ha_bearer_token" type="text" placeholder="Long-lived access token" />
+        </div>
+        <div class="row voice-mode-direct">
+          <label for="ha_tts_entity">TTS Engine Entity</label>
+          <input id="ha_tts_entity" type="text" placeholder="tts.google_translate_en_com" />
+        </div>
+        <div class="row voice-mode-webhook">
+          <label for="ha_webhook_url">Webhook URL (fallback mode)</label>
+          <input id="ha_webhook_url" type="text" placeholder="http://homeassistant.local:8123/api/webhook/your_id" />
+        </div>
+        <div class="row voice-mode-webhook">
+          <label for="ha_webhook_secret">Webhook Secret Header (optional)</label>
+          <input id="ha_webhook_secret" type="text" placeholder="Sends as X-Webhook-Secret" />
+        </div>
+        <p style="margin: 6px 0 0; font-size: 12px; color: var(--muted);">
+          Set per-stream voice alerts in the stream list above. Direct TTS mode does not require Home Assistant YAML. Daytime windows use the server's local timezone.
         </p>
+      </div>
+    </section>
+    </div>
+
+    <div class="column-stack side-stack">
+      <section class="card section-card feeds-card is-open" data-section="feeds">
+        <div class="group-head">
+          <button type="button" class="group-toggle" data-toggle-section="feeds" aria-expanded="true">
+            <span class="group-copy">
+              <span class="group-kicker">Feeds</span>
+              <span class="group-title">All Saved Feeds</span>
+              <span class="group-summary">Live previews with per-feed source, last frame, motion, and voice status.</span>
+            </span>
+            <span class="group-chevron" aria-hidden="true"></span>
+          </button>
+          <button type="button" class="info-btn" data-help-key="feeds" aria-label="About feed previews">i</button>
+        </div>
+        <div class="section-body">
+          <div class="all-feeds-box">
+            <div id="all_feeds_grid" class="all-feeds-grid"></div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <section class="card section-card firmware-card span-2" data-section="firmware">
+      <div class="group-head">
+        <button type="button" class="group-toggle" data-toggle-section="firmware" aria-expanded="false">
+          <span class="group-copy">
+            <span class="group-kicker">Firmware</span>
+            <span class="group-title">Build & Flash Devices</span>
+            <span class="group-summary">USB flash from this machine, or prepare browser flashing packages for container deployments.</span>
+          </span>
+          <span class="group-chevron" aria-hidden="true"></span>
+        </button>
+        <button type="button" class="info-btn" data-help-key="firmware" aria-label="About firmware flashing">i</button>
+      </div>
+      <div class="section-body">
         <div class="firm-grid">
           <div class="row">
-            <label for="webflash_board">Board</label>
-            <select id="webflash_board">
+            <label for="fw_board">Board</label>
+            <select id="fw_board">
               <option value="cyd">Cheap Yellow Display (ESP32-2432S028R)</option>
               <option value="ttgo_tdisplay">TTGO T-Display</option>
               <option value="esp32_s3_2p8">ESP32-S3 2.8&quot; 240x320</option>
             </select>
           </div>
           <div class="row">
-            <label for="webflash_ssid">Wi-Fi SSID</label>
-            <input id="webflash_ssid" type="text" placeholder="Your Wi-Fi name" value="Homelan" />
+            <label for="fw_flavor">Firmware Flavor</label>
+            <select id="fw_flavor">
+              <option value="audio_on">Audio On</option>
+              <option value="no_audio">Audio Off (Higher FPS)</option>
+            </select>
           </div>
           <div class="row">
-            <label for="webflash_password">Wi-Fi Password</label>
-            <input id="webflash_password" type="text" placeholder="Your Wi-Fi password" />
+            <label for="fw_upload_port">USB Port (optional)</label>
+            <input id="fw_upload_port" type="text" placeholder="/dev/cu.usbserial-1110" />
           </div>
           <div class="row">
-            <label for="webflash_server_host">Server Host/IP</label>
-            <input id="webflash_server_host" type="text" placeholder="192.168.1.16" />
+            <label for="fw_ssid">Wi-Fi SSID</label>
+            <input id="fw_ssid" type="text" placeholder="Your Wi-Fi name" value="Homelan" />
           </div>
           <div class="row">
-            <label for="webflash_server_port">Server Port</label>
-            <input id="webflash_server_port" type="number" min="1" max="65535" step="1" value="8124" />
+            <label for="fw_password">Wi-Fi Password</label>
+            <input id="fw_password" type="text" placeholder="Your Wi-Fi password" />
+          </div>
+          <div class="row">
+            <label for="fw_server_host">Server Host/IP</label>
+            <input id="fw_server_host" type="text" placeholder="192.168.1.16" />
+          </div>
+          <div class="row">
+            <label for="fw_server_port">Server Port</label>
+            <input id="fw_server_port" type="number" min="1" max="65535" step="1" value="8124" />
           </div>
         </div>
         <div class="actions">
-          <div>
-            <div style="font-size: 12px; color: var(--muted); margin-bottom: 4px;">Audio On</div>
-            <button class="secondary" id="webflash_prepare_audio_btn">Prepare + Flash</button>
-            <div id="webflash_audio_slot"></div>
+          <button class="primary" id="flash_btn">Build + Flash Device</button>
+          <button class="secondary" id="refresh_flash_btn">Refresh Flash Status</button>
+        </div>
+        <div id="flash_status_box" class="status">Idle</div>
+        <div id="flash_ports" class="meta"></div>
+        <div id="flash_log" class="mono"></div>
+
+        <div class="subsection-card section-card is-open" data-section="webflash">
+          <div class="group-head">
+            <button type="button" class="group-toggle" data-toggle-section="webflash" aria-expanded="true">
+              <span class="group-copy">
+                <span class="group-kicker">Browser Flash</span>
+                <span class="group-title">Prepare Web Installer</span>
+                <span class="group-summary">Use Chrome or Edge on the machine physically connected to the ESP device.</span>
+              </span>
+              <span class="group-chevron" aria-hidden="true"></span>
+            </button>
+            <button type="button" class="info-btn" data-help-key="webflash" aria-label="About browser flashing">i</button>
           </div>
-          <div>
-            <div style="font-size: 12px; color: var(--muted); margin-bottom: 4px;">Audio Off (Higher FPS)</div>
-            <button class="secondary" id="webflash_prepare_no_audio_btn">Prepare + Flash</button>
-            <div id="webflash_no_audio_slot"></div>
+          <div class="section-body">
+            <div class="firm-grid">
+              <div class="row">
+                <label for="webflash_board">Board</label>
+                <select id="webflash_board">
+                  <option value="cyd">Cheap Yellow Display (ESP32-2432S028R)</option>
+                  <option value="ttgo_tdisplay">TTGO T-Display</option>
+                  <option value="esp32_s3_2p8">ESP32-S3 2.8&quot; 240x320</option>
+                </select>
+              </div>
+              <div class="row">
+                <label for="webflash_ssid">Wi-Fi SSID</label>
+                <input id="webflash_ssid" type="text" placeholder="Your Wi-Fi name" value="Homelan" />
+              </div>
+              <div class="row">
+                <label for="webflash_password">Wi-Fi Password</label>
+                <input id="webflash_password" type="text" placeholder="Your Wi-Fi password" />
+              </div>
+              <div class="row">
+                <label for="webflash_server_host">Server Host/IP</label>
+                <input id="webflash_server_host" type="text" placeholder="192.168.1.16" />
+              </div>
+              <div class="row">
+                <label for="webflash_server_port">Server Port</label>
+                <input id="webflash_server_port" type="number" min="1" max="65535" step="1" value="8124" />
+              </div>
+            </div>
+            <div class="actions">
+              <div>
+                <div style="font-size: 12px; color: var(--muted); margin-bottom: 4px;">Audio On</div>
+                <button class="secondary" id="webflash_prepare_audio_btn">Prepare + Flash</button>
+                <div id="webflash_audio_slot"></div>
+              </div>
+              <div>
+                <div style="font-size: 12px; color: var(--muted); margin-bottom: 4px;">Audio Off (Higher FPS)</div>
+                <button class="secondary" id="webflash_prepare_no_audio_btn">Prepare + Flash</button>
+                <div id="webflash_no_audio_slot"></div>
+              </div>
+            </div>
+            <div id="webflash_status" class="status" style="margin-top: 10px;">Ready</div>
           </div>
         </div>
-        <div id="webflash_status" class="status" style="margin-top: 10px;">Ready</div>
       </div>
     </section>
+  </div>
+
+  <div id="help_overlay" class="help-overlay" hidden>
+    <div class="help-modal" role="dialog" aria-modal="true" aria-labelledby="help_title">
+      <div class="help-modal-head">
+        <div>
+          <div class="group-kicker">Help</div>
+          <div id="help_title" class="help-title">Section Help</div>
+        </div>
+        <button type="button" class="secondary tiny" id="help_close_btn">Close</button>
+      </div>
+      <div id="help_body" class="help-body"></div>
+    </div>
   </div>
 
   <script>
@@ -2563,6 +2931,213 @@ def admin_ui():
     const clientId = getClientId();
     function withCid(path) {
       return path + (path.includes("?") ? "&" : "?") + "cid=" + encodeURIComponent(clientId);
+    }
+
+    const SECTION_STATE_KEY = "esp32_tv_admin_sections_v1";
+    const DEFAULT_SECTION_STATE = {
+      streams: true,
+      feeds: true,
+      image: false,
+      status: true,
+      motion: false,
+      "motion-advanced": false,
+      voice: false,
+      firmware: false,
+      webflash: true
+    };
+    const HELP_CONTENT = {
+      streams: {
+        title: "Streams",
+        body: [
+          "Use this section to define which RTSP feeds are available to this browser session.",
+          "The Current Stream URL follows the currently selected saved stream, so changing it updates that saved entry.",
+          "Apply All Changes after editing streams to make the server reconnect cleanly."
+        ]
+      },
+      feeds: {
+        title: "All Saved Feeds",
+        body: [
+          "Each tile shows a live preview for one saved stream.",
+          "The text beneath each tile shows the source URL, last frame time, motion state, and the last voice alert result for that stream.",
+          "Click a tile to make this browser switch to that stream."
+        ]
+      },
+      image: {
+        title: "Display Tuning",
+        body: [
+          "These controls affect how frames are encoded and how they look on the display.",
+          "JPEG Quality affects compression, while contrast, brightness, and saturation shape the final image.",
+          "Use presets first, then fine-tune only if needed."
+        ]
+      },
+      status: {
+        title: "Live Status",
+        body: [
+          "This section reflects the current state of the stream selected by this browser.",
+          "It shows stream health, the active source, the most recent frame time, motion state, and the latest stream error.",
+          "It is read-only and updates automatically."
+        ]
+      },
+      motion: {
+        title: "Motion Detection",
+        body: [
+          "Keep the basic controls simple: enable motion, set the threshold, and choose how long a trigger stays active.",
+          "Lower thresholds make detection more sensitive. Higher thresholds reduce false triggers.",
+          "Audio alerts play locally from the server if a compatible alert file is present."
+        ]
+      },
+      "motion-advanced": {
+        title: "Advanced Motion Settings",
+        body: [
+          "These controls tune the background-subtraction detector introduced to reduce noise and flicker.",
+          "Lower sensitivity thresholds and smaller movement sizes react faster but can cause more false positives.",
+          "Change one setting at a time and watch the per-feed motion readout before adjusting further.",
+          "Each field in this section now has its own info button with a deeper explanation."
+        ]
+      },
+      motion_detect_width_field: {
+        title: "Detection Width",
+        body: [
+          "This is the width of the reduced grayscale frame used only for motion analysis, not for display output.",
+          "A larger value preserves more detail and can detect smaller movements, but increases CPU use and may react more to compression noise.",
+          "A smaller value is cheaper and often more stable, but may miss subtle movement. The default of 160 is a balanced choice for most streams.",
+          "Raise this only if small subjects are being missed after you have already lowered the main motion threshold."
+        ]
+      },
+      motion_detect_height_field: {
+        title: "Detection Height",
+        body: [
+          "This is the height of the reduced analysis frame paired with Detection Width.",
+          "Together, width and height define how much visual detail the detector sees before it builds the motion mask.",
+          "Keeping the aspect ratio roughly close to the source image avoids stretching and gives more consistent contour sizes.",
+          "The default of 120 works with width 160 as a low-cost 4:3 analysis frame."
+        ]
+      },
+      motion_bg_history_field: {
+        title: "Background History",
+        body: [
+          "This controls how many past frames the detector remembers while building its background model.",
+          "Higher values make the detector slower to 'forget' older scene information. That usually reduces flicker and short-term false positives, but it can delay adaptation to real lighting changes.",
+          "Lower values make the detector adapt faster, which helps if the scene changes often, but it can also make genuine motion disappear into the background too quickly.",
+          "If you see repeated false triggers from noisy cameras, try increasing this. If the detector stays confused after a scene change, lower it."
+        ]
+      },
+      motion_bg_var_threshold_field: {
+        title: "Sensitivity To Scene Changes",
+        body: [
+          "This is the core threshold used by the background subtractor to decide whether a pixel is 'different enough' from the learned background.",
+          "Lower values make the detector more sensitive. It will pick up subtle movement faster, but it will also react more to video noise, timestamp flicker, and tiny exposure shifts.",
+          "Higher values make the detector less sensitive. That reduces false positives, but requires more obvious movement before anything is counted.",
+          "If motion is triggering too easily, raise this first. If the detector misses clear movement, lower it slightly."
+        ]
+      },
+      motion_bg_learning_rate_field: {
+        title: "Background Adaptation Speed",
+        body: [
+          "This controls how quickly the detector updates its idea of what the normal background looks like.",
+          "A higher value means the background model changes quickly. That helps the detector recover faster from lighting changes, but moving objects can become 'normal' too soon.",
+          "A lower value means the detector changes slowly. That makes it more stable, but it can stay upset for longer after a sudden lighting shift.",
+          "Use lower values for stable cameras. Use slightly higher values only if the scene changes often and the detector stays noisy for too long."
+        ]
+      },
+      motion_min_contour_area_pct_field: {
+        title: "Minimum Movement Size",
+        body: [
+          "After the motion mask is built, the server looks for moving blobs. This setting ignores blobs smaller than a percentage of the analysis frame.",
+          "Lower values let tiny movements count, which is useful for distant subjects, but they can also let compression blocks, rain, insects, or timestamp edges trigger motion.",
+          "Higher values ignore small moving regions and require larger moving shapes, which is usually better for reliability.",
+          "If you are getting lots of tiny false triggers, increase this. If small real subjects are being ignored, decrease it."
+        ]
+      },
+      motion_warmup_frames_field: {
+        title: "Startup Stabilization",
+        body: [
+          "When a stream or detector starts, the background model needs a few frames to settle. During this warm-up period, motion is measured but intentionally ignored.",
+          "A higher value reduces startup false positives, especially on noisy RTSP streams or after reconnects.",
+          "A lower value makes motion alerts become active sooner, but can cause immediate false triggers while the detector is still learning the scene.",
+          "If you see motion trigger right after reconnecting to a stream, increase this setting."
+        ]
+      },
+      voice: {
+        title: "Voice Alerts",
+        body: [
+          "This section controls spoken motion alerts through Home Assistant.",
+          "You can restrict alerts to daytime hours, set a cooldown, and choose direct TTS or webhook delivery.",
+          "Per-stream voice routing is still controlled in the stream list."
+        ]
+      },
+      firmware: {
+        title: "Firmware Flashing",
+        body: [
+          "Use this section to build and flash firmware directly from this machine when the board is attached over USB.",
+          "Board, Wi-Fi, and server details are written into the generated firmware before flashing.",
+          "This section is collapsed by default because it is usually used less often than stream controls."
+        ]
+      },
+      webflash: {
+        title: "Browser Flash",
+        body: [
+          "Browser Flash prepares a manifest and firmware payload for esp-web-tools.",
+          "Use Chrome or Edge on the machine physically connected to the device, then click Prepare + Flash.",
+          "This is the preferred route for container deployments where local serial access is limited."
+        ]
+      }
+    };
+
+    function loadSectionState() {
+      try {
+        const raw = localStorage.getItem(SECTION_STATE_KEY);
+        const parsed = raw ? JSON.parse(raw) : {};
+        return Object.assign({}, DEFAULT_SECTION_STATE, parsed || {});
+      } catch (err) {
+        return Object.assign({}, DEFAULT_SECTION_STATE);
+      }
+    }
+
+    let sectionState = loadSectionState();
+
+    function saveSectionState() {
+      try {
+        localStorage.setItem(SECTION_STATE_KEY, JSON.stringify(sectionState));
+      } catch (err) {
+      }
+    }
+
+    function applySectionState() {
+      document.querySelectorAll(".section-card[data-section]").forEach((card) => {
+        const key = card.dataset.section;
+        const open = Object.prototype.hasOwnProperty.call(sectionState, key) ? !!sectionState[key] : true;
+        card.classList.toggle("is-open", open);
+        const toggle = card.querySelector(".group-toggle");
+        if (toggle) {
+          toggle.setAttribute("aria-expanded", open ? "true" : "false");
+        }
+      });
+    }
+
+    function toggleSection(key) {
+      sectionState[key] = !sectionState[key];
+      saveSectionState();
+      applySectionState();
+    }
+
+    const helpOverlay = document.getElementById("help_overlay");
+    const helpTitleEl = document.getElementById("help_title");
+    const helpBodyEl = document.getElementById("help_body");
+
+    function openHelp(key) {
+      const entry = HELP_CONTENT[key];
+      if (!entry || !helpOverlay || !helpTitleEl || !helpBodyEl) return;
+      helpTitleEl.textContent = entry.title;
+      helpBodyEl.innerHTML = (entry.body || []).map((line) => `<div>${line}</div>`).join("");
+      helpOverlay.hidden = false;
+      document.body.style.overflow = "hidden";
+    }
+
+    function closeHelp() {
+      if (!helpOverlay) return;
+      helpOverlay.hidden = true;
+      document.body.style.overflow = "";
     }
 
     const ids = ["jpeg_quality", "contrast", "brightness", "saturation"];
@@ -2605,6 +3180,8 @@ def admin_ui():
     }
 
     let isDirty = false;
+    let latestRuntimeState = {};
+    let latestStreamStates = [];
     const streamListEl = document.getElementById("stream_list");
     const activeStreamEl = document.getElementById("active_stream_index");
     const allFeedsGridEl = document.getElementById("all_feeds_grid");
@@ -2795,8 +3372,10 @@ def admin_ui():
 
     function updateState(st, streamStates) {
       st = st || {};
+      latestRuntimeState = st;
+      latestStreamStates = Array.isArray(streamStates) ? streamStates : [];
       const byIdx = new Map();
-      (streamStates || []).forEach((entry) => {
+      latestStreamStates.forEach((entry) => {
         byIdx.set(Number(entry.idx), entry || {});
       });
       document.querySelectorAll(".feed-tile").forEach((item) => {
@@ -2830,6 +3409,22 @@ def admin_ui():
           }
         }
       });
+      const runtimeStateEl = document.getElementById("runtime_status_state");
+      const runtimeStreamEl = document.getElementById("runtime_status_stream");
+      const runtimeSourceEl = document.getElementById("runtime_status_source");
+      const runtimeFrameEl = document.getElementById("runtime_status_frame");
+      const runtimeMotionEl = document.getElementById("runtime_status_motion");
+      const runtimeErrorEl = document.getElementById("runtime_status_error");
+      if (runtimeStateEl) runtimeStateEl.textContent = st.status || "-";
+      if (runtimeStreamEl) runtimeStreamEl.textContent = st.active_stream_name || "-";
+      if (runtimeSourceEl) runtimeSourceEl.textContent = st.source || "-";
+      if (runtimeFrameEl) runtimeFrameEl.textContent = st.last_frame_ms ? new Date(Number(st.last_frame_ms)).toLocaleTimeString() : "-";
+      if (runtimeMotionEl) {
+        runtimeMotionEl.textContent = st.motion_active
+          ? `detected (${(Number(st.motion_ratio || 0)).toFixed(2)}%)`
+          : "idle";
+      }
+      if (runtimeErrorEl) runtimeErrorEl.textContent = st.last_error || "-";
       setAllFeedsActive(Number((st.active_stream_index ?? activeStreamEl.value) || 0));
     }
 
@@ -2838,7 +3433,9 @@ def admin_ui():
       if (!isDirty && s) {
         applySettingsToForm(s);
       }
-      updateState(data.state || {}, data.stream_states || []);
+      const nextState = ("state" in data) ? (data.state || {}) : latestRuntimeState;
+      const nextStreamStates = ("stream_states" in data) ? (data.stream_states || []) : latestStreamStates;
+      updateState(nextState, nextStreamStates);
     }
 
     async function loadSettings() {
@@ -2903,7 +3500,7 @@ def admin_ui():
         return;
       }
       isDirty = false;
-      hydrate({settings: data.settings, state: {}});
+      hydrate({settings: data.settings});
       if (data.warning) {
         setStatus("Applied with warning: " + data.warning, "warn");
       } else {
@@ -2930,7 +3527,7 @@ def admin_ui():
         return;
       }
       isDirty = false;
-      hydrate({settings: data.settings, state: {}});
+      hydrate({settings: data.settings});
       setStatus(`Preset applied: ${kind}`, "ok");
     }
 
@@ -2998,10 +3595,30 @@ def admin_ui():
     document.querySelectorAll("input,select").forEach((el) => {
       el.addEventListener("change", () => { isDirty = true; });
     });
+    document.querySelectorAll("[data-toggle-section]").forEach((el) => {
+      el.addEventListener("click", () => toggleSection(el.dataset.toggleSection));
+    });
+    document.querySelectorAll(".info-btn[data-help-key]").forEach((el) => {
+      el.addEventListener("click", () => openHelp(el.dataset.helpKey));
+    });
+    document.getElementById("help_close_btn").addEventListener("click", closeHelp);
+    if (helpOverlay) {
+      helpOverlay.addEventListener("click", (e) => {
+        if (e.target === helpOverlay) {
+          closeHelp();
+        }
+      });
+    }
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && helpOverlay && !helpOverlay.hidden) {
+        closeHelp();
+      }
+    });
+    applySectionState();
 
     function populateFirmwareDefaultsFromSettings() {
       const url = document.getElementById("rtsp_url").value || "";
-      const m = url.match(/@([^:/]+)(?::\\d+)?\\//);
+      const m = url.match(/@([^:/]+)(?::\d+)?\//);
       document.getElementById("fw_server_host").value = (m && m[1]) ? m[1] : "192.168.1.16";
       document.getElementById("fw_server_port").value = 8124;
       document.getElementById("webflash_server_host").value = document.getElementById("fw_server_host").value;
