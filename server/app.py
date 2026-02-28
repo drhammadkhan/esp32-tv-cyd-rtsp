@@ -69,6 +69,21 @@ def _int_env(name: str, default: int, minimum=None, maximum=None) -> int:
     return value
 
 
+def _float_env(name: str, default: float, minimum=None, maximum=None) -> float:
+    raw = os.getenv(name, "").strip()
+    value = default
+    if raw:
+        try:
+            value = float(raw)
+        except Exception:
+            value = default
+    if minimum is not None and value < minimum:
+        value = minimum
+    if maximum is not None and value > maximum:
+        value = maximum
+    return value
+
+
 RTSP_OPEN_TIMEOUT_MS = _int_env("RTSP_OPEN_TIMEOUT_MS", 6000, minimum=500, maximum=120000)
 RTSP_READ_TIMEOUT_MS = _int_env("RTSP_READ_TIMEOUT_MS", 6000, minimum=500, maximum=120000)
 RTSP_STALE_RECONNECT_MS = _int_env("RTSP_STALE_RECONNECT_MS", 12000, minimum=2000, maximum=300000)
@@ -79,6 +94,13 @@ RTSP_READ_RETRY_COUNT = _int_env("RTSP_READ_RETRY_COUNT", 12, minimum=1, maximum
 RTSP_FPS_MAX = _int_env("RTSP_FPS_MAX", 18, minimum=1, maximum=60)
 RTSP_FPS_BALANCED = _int_env("RTSP_FPS_BALANCED", 12, minimum=1, maximum=60)
 RTSP_FPS_BEST_QUALITY = _int_env("RTSP_FPS_BEST_QUALITY", 10, minimum=1, maximum=60)
+MOTION_DETECT_WIDTH = _int_env("MOTION_DETECT_WIDTH", 160, minimum=64, maximum=640)
+MOTION_DETECT_HEIGHT = _int_env("MOTION_DETECT_HEIGHT", 120, minimum=48, maximum=480)
+MOTION_BG_HISTORY = _int_env("MOTION_BG_HISTORY", 90, minimum=10, maximum=2000)
+MOTION_BG_VAR_THRESHOLD = _float_env("MOTION_BG_VAR_THRESHOLD", 32.0, minimum=4.0, maximum=255.0)
+MOTION_BG_LEARNING_RATE = _float_env("MOTION_BG_LEARNING_RATE", 0.02, minimum=0.0, maximum=1.0)
+MOTION_MIN_CONTOUR_AREA_PCT = _float_env("MOTION_MIN_CONTOUR_AREA_PCT", 0.12, minimum=0.001, maximum=20.0)
+MOTION_WARMUP_FRAMES = _int_env("MOTION_WARMUP_FRAMES", 12, minimum=0, maximum=600)
 
 if not os.getenv("OPENCV_FFMPEG_CAPTURE_OPTIONS"):
     ffmpeg_timeout_us = max(RTSP_READ_TIMEOUT_MS, RTSP_OPEN_TIMEOUT_MS) * 1000
@@ -101,6 +123,13 @@ settings = {
     "motion_enabled": os.getenv("MOTION_ENABLED", "1") == "1",
     "motion_threshold": float(os.getenv("MOTION_THRESHOLD", "2.5")),
     "motion_hold_ms": int(os.getenv("MOTION_HOLD_MS", "4000")),
+    "motion_detect_width": MOTION_DETECT_WIDTH,
+    "motion_detect_height": MOTION_DETECT_HEIGHT,
+    "motion_bg_history": MOTION_BG_HISTORY,
+    "motion_bg_var_threshold": MOTION_BG_VAR_THRESHOLD,
+    "motion_bg_learning_rate": MOTION_BG_LEARNING_RATE,
+    "motion_min_contour_area_pct": MOTION_MIN_CONTOUR_AREA_PCT,
+    "motion_warmup_frames": MOTION_WARMUP_FRAMES,
     "motion_audio_enabled": os.getenv("MOTION_AUDIO_ENABLED", "1") == "1",
     "motion_voice_enabled": os.getenv("MOTION_VOICE_ENABLED", "0") == "1",
     "motion_voice_cooldown_ms": int(os.getenv("MOTION_VOICE_COOLDOWN_MS", "30000")),
@@ -298,6 +327,51 @@ def _sync_rtsp_url_locked():
     settings["rtsp_url"] = streams[idx]["url"]
 
 
+def _motion_detector_settings(cfg: dict) -> dict:
+    out = {}
+    try:
+        out["motion_detect_width"] = max(64, min(640, int(cfg.get("motion_detect_width", MOTION_DETECT_WIDTH))))
+    except Exception:
+        out["motion_detect_width"] = MOTION_DETECT_WIDTH
+    try:
+        out["motion_detect_height"] = max(48, min(480, int(cfg.get("motion_detect_height", MOTION_DETECT_HEIGHT))))
+    except Exception:
+        out["motion_detect_height"] = MOTION_DETECT_HEIGHT
+    try:
+        out["motion_bg_history"] = max(10, min(2000, int(cfg.get("motion_bg_history", MOTION_BG_HISTORY))))
+    except Exception:
+        out["motion_bg_history"] = MOTION_BG_HISTORY
+    try:
+        out["motion_bg_var_threshold"] = max(4.0, min(255.0, float(cfg.get("motion_bg_var_threshold", MOTION_BG_VAR_THRESHOLD))))
+    except Exception:
+        out["motion_bg_var_threshold"] = MOTION_BG_VAR_THRESHOLD
+    try:
+        out["motion_bg_learning_rate"] = max(0.0, min(1.0, float(cfg.get("motion_bg_learning_rate", MOTION_BG_LEARNING_RATE))))
+    except Exception:
+        out["motion_bg_learning_rate"] = MOTION_BG_LEARNING_RATE
+    try:
+        out["motion_min_contour_area_pct"] = max(0.001, min(20.0, float(cfg.get("motion_min_contour_area_pct", MOTION_MIN_CONTOUR_AREA_PCT))))
+    except Exception:
+        out["motion_min_contour_area_pct"] = MOTION_MIN_CONTOUR_AREA_PCT
+    try:
+        out["motion_warmup_frames"] = max(0, min(600, int(cfg.get("motion_warmup_frames", MOTION_WARMUP_FRAMES))))
+    except Exception:
+        out["motion_warmup_frames"] = MOTION_WARMUP_FRAMES
+    return out
+
+
+def _motion_detector_signature(motion_cfg: dict):
+    return (
+        int(motion_cfg["motion_detect_width"]),
+        int(motion_cfg["motion_detect_height"]),
+        int(motion_cfg["motion_bg_history"]),
+        float(motion_cfg["motion_bg_var_threshold"]),
+        float(motion_cfg["motion_bg_learning_rate"]),
+        float(motion_cfg["motion_min_contour_area_pct"]),
+        int(motion_cfg["motion_warmup_frames"]),
+    )
+
+
 def _settings_for_response():
     cfg = _get_settings()
     streams = _normalize_streams(cfg.get("streams", []))
@@ -313,6 +387,7 @@ def _settings_for_response():
     cfg["active_stream_index"] = idx
     cfg["rtsp_url"] = streams[idx]["url"] if streams else ""
     cfg["ha_base_url"] = _normalize_ha_base_url(cfg.get("ha_base_url", ""))
+    cfg.update(_motion_detector_settings(cfg))
     if not str(cfg.get("motion_voice_default_entity", "")).strip():
         cfg["motion_voice_default_entity"] = DEFAULT_MOTION_VOICE_ENTITY
     cfg["motion_voice_daytime_only"] = bool(cfg.get("motion_voice_daytime_only", False))
@@ -385,6 +460,41 @@ def _load_settings():
         if "motion_hold_ms" in loaded:
             try:
                 settings["motion_hold_ms"] = int(loaded["motion_hold_ms"])
+            except Exception:
+                pass
+        if "motion_detect_width" in loaded:
+            try:
+                settings["motion_detect_width"] = max(64, min(640, int(loaded["motion_detect_width"])))
+            except Exception:
+                pass
+        if "motion_detect_height" in loaded:
+            try:
+                settings["motion_detect_height"] = max(48, min(480, int(loaded["motion_detect_height"])))
+            except Exception:
+                pass
+        if "motion_bg_history" in loaded:
+            try:
+                settings["motion_bg_history"] = max(10, min(2000, int(loaded["motion_bg_history"])))
+            except Exception:
+                pass
+        if "motion_bg_var_threshold" in loaded:
+            try:
+                settings["motion_bg_var_threshold"] = max(4.0, min(255.0, float(loaded["motion_bg_var_threshold"])))
+            except Exception:
+                pass
+        if "motion_bg_learning_rate" in loaded:
+            try:
+                settings["motion_bg_learning_rate"] = max(0.0, min(1.0, float(loaded["motion_bg_learning_rate"])))
+            except Exception:
+                pass
+        if "motion_min_contour_area_pct" in loaded:
+            try:
+                settings["motion_min_contour_area_pct"] = max(0.001, min(20.0, float(loaded["motion_min_contour_area_pct"])))
+            except Exception:
+                pass
+        if "motion_warmup_frames" in loaded:
+            try:
+                settings["motion_warmup_frames"] = max(0, min(600, int(loaded["motion_warmup_frames"])))
             except Exception:
                 pass
         if "motion_audio_enabled" in loaded:
@@ -639,6 +749,49 @@ def _encode_black_frame():
     frame = np.zeros((FRAME_SIZE[1], FRAME_SIZE[0], 3), dtype=np.uint8)
     ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
     return buf.tobytes() if ok else b""
+
+
+def _build_motion_detector(motion_cfg: dict):
+    return cv2.createBackgroundSubtractorMOG2(
+        history=int(motion_cfg["motion_bg_history"]),
+        varThreshold=float(motion_cfg["motion_bg_var_threshold"]),
+        detectShadows=False,
+    )
+
+
+def _motion_detection_frame(frame, motion_cfg: dict):
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    src_h, src_w = gray.shape[:2]
+    target_w = int(motion_cfg["motion_detect_width"])
+    target_h = int(motion_cfg["motion_detect_height"])
+    if src_w == 0 or src_h == 0:
+        return np.zeros((target_h, target_w), dtype=np.uint8)
+    interpolation = cv2.INTER_AREA if src_w > target_w or src_h > target_h else cv2.INTER_LINEAR
+    gray = cv2.resize(gray, (target_w, target_h), interpolation=interpolation)
+    return cv2.GaussianBlur(gray, (5, 5), 0)
+
+
+def _measure_motion_ratio(frame, motion_detector, detector_frames_seen: int, motion_cfg: dict) -> float:
+    if motion_detector is None:
+        return 0.0
+    detect_frame = _motion_detection_frame(frame, motion_cfg)
+    mask = motion_detector.apply(detect_frame, learningRate=float(motion_cfg["motion_bg_learning_rate"]))
+    kernel = np.ones((3, 3), dtype=np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+    mask = cv2.dilate(mask, kernel, iterations=2)
+    contours_info = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours = contours_info[0] if len(contours_info) == 2 else contours_info[1]
+    frame_area = float(mask.shape[0] * mask.shape[1]) if mask.size else 1.0
+    min_contour_area = max(12.0, frame_area * (float(motion_cfg["motion_min_contour_area_pct"]) / 100.0))
+    motion_area = 0.0
+    for contour in contours:
+        area = float(cv2.contourArea(contour))
+        if area < min_contour_area:
+            continue
+        motion_area += area
+    if detector_frames_seen < int(motion_cfg["motion_warmup_frames"]):
+        return 0.0
+    return (motion_area * 100.0) / frame_area
 
 
 def _set_motion_voice_error(message: str):
@@ -1107,7 +1260,9 @@ def _stream_capture_worker(worker):
             continue
         worker["status"] = "streaming"
         last_emit = 0.0
-        prev_gray = None
+        motion_detector = None
+        motion_detector_sig = None
+        detector_frames_seen = 0
         last_read_ok_ms = _now_ms()
         consecutive_read_failures = 0
         while worker["running"]:
@@ -1136,15 +1291,19 @@ def _stream_capture_worker(worker):
                 continue
             frame = _fit_frame(frame)
             if cfg.get("motion_enabled", False):
-                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                if prev_gray is not None:
-                    diff = cv2.absdiff(gray, prev_gray)
-                    _, thresh = cv2.threshold(diff, 18, 255, cv2.THRESH_BINARY)
-                    motion_ratio = (float(np.count_nonzero(thresh)) * 100.0) / float(thresh.size)
-                    worker["motion_ratio"] = motion_ratio
-                    if motion_ratio >= float(cfg.get("motion_threshold", 2.5)):
-                        _set_motion_trigger(worker["idx"], motion_ratio, int(cfg.get("motion_hold_ms", 4000)))
-                prev_gray = gray
+                motion_cfg = _motion_detector_settings(cfg)
+                next_motion_sig = _motion_detector_signature(motion_cfg)
+                if motion_detector is None or motion_detector_sig != next_motion_sig:
+                    motion_detector = _build_motion_detector(motion_cfg)
+                    motion_detector_sig = next_motion_sig
+                    detector_frames_seen = 0
+                motion_ratio = _measure_motion_ratio(frame, motion_detector, detector_frames_seen, motion_cfg)
+                worker["motion_ratio"] = motion_ratio
+                detector_frames_seen += 1
+                if motion_ratio >= float(cfg.get("motion_threshold", 2.5)):
+                    _set_motion_trigger(worker["idx"], motion_ratio, int(cfg.get("motion_hold_ms", 4000)))
+            else:
+                worker["motion_ratio"] = 0.0
             frame = _enhance_frame(frame, cfg["contrast"], cfg["brightness"], cfg["saturation"], preset)
             if cfg["swap_rb"]:
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -1557,6 +1716,62 @@ def api_set_settings():
             updates["motion_hold_ms"] = motion_hold_ms
         except Exception:
             errors.append("motion_hold_ms must be between 200 and 60000")
+    if "motion_detect_width" in payload:
+        try:
+            value = int(payload["motion_detect_width"])
+            if value < 64 or value > 640:
+                raise ValueError
+            updates["motion_detect_width"] = value
+        except Exception:
+            errors.append("motion_detect_width must be an integer between 64 and 640")
+    if "motion_detect_height" in payload:
+        try:
+            value = int(payload["motion_detect_height"])
+            if value < 48 or value > 480:
+                raise ValueError
+            updates["motion_detect_height"] = value
+        except Exception:
+            errors.append("motion_detect_height must be an integer between 48 and 480")
+    if "motion_bg_history" in payload:
+        try:
+            value = int(payload["motion_bg_history"])
+            if value < 10 or value > 2000:
+                raise ValueError
+            updates["motion_bg_history"] = value
+        except Exception:
+            errors.append("motion_bg_history must be an integer between 10 and 2000")
+    if "motion_bg_var_threshold" in payload:
+        try:
+            value = float(payload["motion_bg_var_threshold"])
+            if value < 4.0 or value > 255.0:
+                raise ValueError
+            updates["motion_bg_var_threshold"] = value
+        except Exception:
+            errors.append("motion_bg_var_threshold must be between 4.0 and 255.0")
+    if "motion_bg_learning_rate" in payload:
+        try:
+            value = float(payload["motion_bg_learning_rate"])
+            if value < 0.0 or value > 1.0:
+                raise ValueError
+            updates["motion_bg_learning_rate"] = value
+        except Exception:
+            errors.append("motion_bg_learning_rate must be between 0.0 and 1.0")
+    if "motion_min_contour_area_pct" in payload:
+        try:
+            value = float(payload["motion_min_contour_area_pct"])
+            if value < 0.001 or value > 20.0:
+                raise ValueError
+            updates["motion_min_contour_area_pct"] = value
+        except Exception:
+            errors.append("motion_min_contour_area_pct must be between 0.001 and 20.0")
+    if "motion_warmup_frames" in payload:
+        try:
+            value = int(payload["motion_warmup_frames"])
+            if value < 0 or value > 600:
+                raise ValueError
+            updates["motion_warmup_frames"] = value
+        except Exception:
+            errors.append("motion_warmup_frames must be an integer between 0 and 600")
     if "motion_audio_enabled" in payload:
         updates["motion_audio_enabled"] = bool(payload["motion_audio_enabled"])
     if "motion_voice_enabled" in payload:
@@ -2128,6 +2343,35 @@ def admin_ui():
         <label for="motion_hold_ms">Motion Hold (ms)</label>
         <input id="motion_hold_ms" type="number" min="200" max="60000" step="100" />
       </div>
+      <p style="margin: 8px 0 4px; font-size: 12px; color: var(--muted);">Advanced motion detector tuning (applies live).</p>
+      <div class="row">
+        <label for="motion_detect_width">Detection Width</label>
+        <input id="motion_detect_width" type="number" min="64" max="640" step="1" />
+      </div>
+      <div class="row">
+        <label for="motion_detect_height">Detection Height</label>
+        <input id="motion_detect_height" type="number" min="48" max="480" step="1" />
+      </div>
+      <div class="row">
+        <label for="motion_bg_history">Background History</label>
+        <input id="motion_bg_history" type="number" min="10" max="2000" step="1" />
+      </div>
+      <div class="row">
+        <label for="motion_bg_var_threshold">Background Threshold</label>
+        <input id="motion_bg_var_threshold" type="number" min="4" max="255" step="0.1" />
+      </div>
+      <div class="row">
+        <label for="motion_bg_learning_rate">Background Learning Rate</label>
+        <input id="motion_bg_learning_rate" type="number" min="0" max="1" step="0.001" />
+      </div>
+      <div class="row">
+        <label for="motion_min_contour_area_pct">Minimum Blob Area (%)</label>
+        <input id="motion_min_contour_area_pct" type="number" min="0.001" max="20" step="0.001" />
+      </div>
+      <div class="row">
+        <label for="motion_warmup_frames">Warm-up Frames</label>
+        <input id="motion_warmup_frames" type="number" min="0" max="600" step="1" />
+      </div>
       <div class="row toggle">
         <input id="motion_audio_enabled" type="checkbox" />
         <label for="motion_audio_enabled" style="margin:0">Play Alert Audio On Motion</label>
@@ -2524,6 +2768,13 @@ def admin_ui():
       document.getElementById("motion_enabled").checked = !!s.motion_enabled;
       document.getElementById("motion_threshold").value = (s.motion_threshold ?? 2.5);
       document.getElementById("motion_hold_ms").value = (s.motion_hold_ms ?? 4000);
+      document.getElementById("motion_detect_width").value = (s.motion_detect_width ?? 160);
+      document.getElementById("motion_detect_height").value = (s.motion_detect_height ?? 120);
+      document.getElementById("motion_bg_history").value = (s.motion_bg_history ?? 90);
+      document.getElementById("motion_bg_var_threshold").value = (s.motion_bg_var_threshold ?? 32.0);
+      document.getElementById("motion_bg_learning_rate").value = (s.motion_bg_learning_rate ?? 0.02);
+      document.getElementById("motion_min_contour_area_pct").value = (s.motion_min_contour_area_pct ?? 0.12);
+      document.getElementById("motion_warmup_frames").value = (s.motion_warmup_frames ?? 12);
       document.getElementById("motion_audio_enabled").checked = (s.motion_audio_enabled ?? true);
       document.getElementById("motion_voice_enabled").checked = !!s.motion_voice_enabled;
       document.getElementById("motion_voice_daytime_only").checked = !!s.motion_voice_daytime_only;
@@ -2619,6 +2870,13 @@ def admin_ui():
         motion_enabled: document.getElementById("motion_enabled").checked,
         motion_threshold: Number(document.getElementById("motion_threshold").value),
         motion_hold_ms: Number(document.getElementById("motion_hold_ms").value),
+        motion_detect_width: Number(document.getElementById("motion_detect_width").value),
+        motion_detect_height: Number(document.getElementById("motion_detect_height").value),
+        motion_bg_history: Number(document.getElementById("motion_bg_history").value),
+        motion_bg_var_threshold: Number(document.getElementById("motion_bg_var_threshold").value),
+        motion_bg_learning_rate: Number(document.getElementById("motion_bg_learning_rate").value),
+        motion_min_contour_area_pct: Number(document.getElementById("motion_min_contour_area_pct").value),
+        motion_warmup_frames: Number(document.getElementById("motion_warmup_frames").value),
         motion_audio_enabled: document.getElementById("motion_audio_enabled").checked,
         motion_voice_enabled: document.getElementById("motion_voice_enabled").checked,
         motion_voice_daytime_only: document.getElementById("motion_voice_daytime_only").checked,
