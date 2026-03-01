@@ -1781,13 +1781,45 @@ def _preview_worker_for(channel_index=None, client_id=None):
     return worker
 
 
+def _preview_stream_target(channel_index=None, client_id=None):
+    cfg = _settings_for_response()
+    streams = cfg.get("streams", [])
+    if len(streams) <= 0:
+        return None, None
+    if channel_index is None:
+        resolved_client_id = client_id or _get_request_client_id()
+        idx = _get_client_active_stream_index(resolved_client_id, len(streams))
+        _cleanup_client_sessions(keep_client_id=resolved_client_id)
+    else:
+        idx = max(0, min(int(channel_index), len(streams) - 1))
+    return idx, streams[idx]["url"]
+
+
+def _latest_preview_frame(channel_index=None, client_id=None):
+    idx, stream_url = _preview_stream_target(channel_index=channel_index, client_id=client_id)
+    if idx is None or not stream_url:
+        return _encode_black_frame()
+    worker = _get_or_start_stream_worker(idx, stream_url)
+    _cleanup_stream_workers(keep_idx=idx)
+    frame = None
+    if int(worker.get("last_frame_ms", 0) or 0) > 0:
+        frame = worker.get("latest_preview_jpeg")
+    if not frame:
+        preview_worker = _get_or_start_preview_ffmpeg_worker(idx, stream_url)
+        _cleanup_preview_ffmpeg_workers()
+        if int(preview_worker.get("last_frame_ms", 0) or 0) > 0:
+            frame = preview_worker.get("latest_jpeg")
+    if not frame:
+        frame = worker.get("latest_preview_jpeg")
+    if not frame:
+        frame = _encode_black_frame()
+    return frame
+
+
 def _stream_preview_mjpeg(channel_index=None, client_id=None):
     boundary = b"--frame\r\n"
     while True:
-        worker = _preview_worker_for(channel_index=channel_index, client_id=client_id)
-        frame = worker.get("latest_preview_jpeg") if worker else None
-        if not frame:
-            frame = _encode_black_frame()
+        frame = _latest_preview_frame(channel_index=channel_index, client_id=client_id)
         yield boundary
         yield b"Content-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
         time.sleep(0.08)
@@ -1812,26 +1844,7 @@ def preview_channel_mjpg(channel_index):
 
 @app.route("/preview/<int:channel_index>.jpg")
 def preview_channel_jpg(channel_index):
-    cfg = _settings_for_response()
-    streams = cfg.get("streams", [])
-    if len(streams) <= 0:
-        return Response(_encode_black_frame(), mimetype="image/jpeg")
-    idx = max(0, min(int(channel_index), len(streams) - 1))
-    stream_url = streams[idx]["url"]
-    worker = _get_or_start_stream_worker(idx, stream_url)
-    _cleanup_stream_workers(keep_idx=idx)
-    frame = None
-    if int(worker.get("last_frame_ms", 0) or 0) > 0:
-        frame = worker.get("latest_preview_jpeg")
-    if not frame:
-        preview_worker = _get_or_start_preview_ffmpeg_worker(idx, stream_url)
-        _cleanup_preview_ffmpeg_workers()
-        if int(preview_worker.get("last_frame_ms", 0) or 0) > 0:
-            frame = preview_worker.get("latest_jpeg")
-    if not frame:
-        frame = worker.get("latest_preview_jpeg")
-    if not frame:
-        frame = _encode_black_frame()
+    frame = _latest_preview_frame(channel_index=channel_index)
     return Response(frame, mimetype="image/jpeg")
 
 
@@ -4298,21 +4311,17 @@ def video_feeds_ui():
       ]));
     }
 
-    function refreshVideoFeedSnapshots() {
-      const stamp = Date.now();
-      gridEl.querySelectorAll(".feed-thumb[data-snapshot-base]").forEach((img) => {
-        img.src = img.dataset.snapshotBase + "&ts=" + stamp;
-      });
-    }
-
     function stopVideoFeedStreams() {
-      gridEl.querySelectorAll(".feed-thumb[data-snapshot-base]").forEach((img) => {
+      gridEl.querySelectorAll(".feed-thumb[data-stream-src]").forEach((img) => {
         img.removeAttribute("src");
       });
     }
 
     function startVideoFeedStreams() {
-      refreshVideoFeedSnapshots();
+      gridEl.querySelectorAll(".feed-thumb[data-stream-src]").forEach((img) => {
+        if (img.getAttribute("src")) return;
+        img.src = img.dataset.streamSrc;
+      });
     }
 
     function syncVideoFeedStreams() {
@@ -4346,7 +4355,7 @@ def video_feeds_ui():
         const img = document.createElement("img");
         img.className = "feed-thumb";
         img.alt = stream.name || `Stream ${i + 1}`;
-        img.dataset.snapshotBase = `/preview/${i}.jpg`;
+        img.dataset.streamSrc = `/preview/${i}.mjpg`;
 
         const head = document.createElement("div");
         head.className = "feed-head";
@@ -4469,10 +4478,6 @@ def video_feeds_ui():
     });
 
     refreshFeeds().catch(() => setStatus("Failed to load feeds", "err"));
-    setInterval(() => {
-      if (!pageIsVisible()) return;
-      refreshVideoFeedSnapshots();
-    }, 350);
     setInterval(() => {
       if (!pageIsVisible()) return;
       refreshFeeds().catch(() => {});
