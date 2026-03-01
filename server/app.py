@@ -94,6 +94,7 @@ RTSP_READ_RETRY_COUNT = _int_env("RTSP_READ_RETRY_COUNT", 12, minimum=1, maximum
 RTSP_FPS_MAX = _int_env("RTSP_FPS_MAX", 18, minimum=1, maximum=60)
 RTSP_FPS_BALANCED = _int_env("RTSP_FPS_BALANCED", 12, minimum=1, maximum=60)
 RTSP_FPS_BEST_QUALITY = _int_env("RTSP_FPS_BEST_QUALITY", 10, minimum=1, maximum=60)
+RTSP_TRANSPORT_PROBE_TIMEOUT_MS = _int_env("RTSP_TRANSPORT_PROBE_TIMEOUT_MS", 6000, minimum=1000, maximum=30000)
 MOTION_DETECT_WIDTH = _int_env("MOTION_DETECT_WIDTH", 160, minimum=64, maximum=640)
 MOTION_DETECT_HEIGHT = _int_env("MOTION_DETECT_HEIGHT", 120, minimum=48, maximum=480)
 MOTION_BG_HISTORY = _int_env("MOTION_BG_HISTORY", 90, minimum=10, maximum=2000)
@@ -150,6 +151,9 @@ if settings["rtsp_url"]:
     settings["active_stream_index"] = 0
 
 capture_state_lock = threading.Lock()
+capture_open_lock = threading.Lock()
+transport_probe_lock = threading.Lock()
+transport_probe_cache = {}
 capture_state = {
     "source": "",
     "status": "starting",
@@ -163,6 +167,8 @@ client_sessions = {}
 video_data = []
 stream_workers_lock = threading.Lock()
 stream_workers = {}
+preview_ffmpeg_workers_lock = threading.Lock()
+preview_ffmpeg_workers = {}
 motion_state_lock = threading.Lock()
 motion_state = {
     "active": False,
@@ -1239,6 +1245,210 @@ def _configure_capture(cap):
         _set_capture_prop(cap, "CAP_PROP_FRAME_HEIGHT", RTSP_CAPTURE_HEIGHT)
 
 
+def _capture_options_for_transport(transport: str) -> str:
+    ffmpeg_timeout_us = max(RTSP_READ_TIMEOUT_MS, RTSP_OPEN_TIMEOUT_MS) * 1000
+    mode = "udp" if transport == "udp" else "tcp"
+    return (
+        f"rtsp_transport;{mode}|stimeout;{ffmpeg_timeout_us}|rw_timeout;{ffmpeg_timeout_us}|"
+        "max_delay;1000000|buffer_size;1048576"
+    )
+
+
+def _probe_transport_command(url: str, transport: str) -> list[str]:
+    return [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-rtsp_transport",
+        transport,
+        "-i",
+        url,
+        "-an",
+        "-frames:v",
+        "1",
+        "-vf",
+        "scale=160:120:force_original_aspect_ratio=decrease,pad=160:120:(ow-iw)/2:(oh-ih)/2:color=black",
+        "-q:v",
+        "8",
+        "-f",
+        "image2pipe",
+        "-vcodec",
+        "mjpeg",
+        "pipe:1",
+    ]
+
+
+def _probe_rtsp_transport(url: str) -> str:
+    url = str(url or "").strip()
+    if not url:
+        return "tcp"
+    with transport_probe_lock:
+        cached = transport_probe_cache.get(url)
+    if cached in ("tcp", "udp"):
+        return cached
+    selected = "tcp"
+    timeout_s = max(1.0, RTSP_TRANSPORT_PROBE_TIMEOUT_MS / 1000.0)
+    for candidate in ("tcp", "udp"):
+        try:
+            proc = subprocess.run(
+                _probe_transport_command(url, candidate),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=timeout_s,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if proc.returncode == 0 and proc.stdout:
+            selected = candidate
+            break
+    with transport_probe_lock:
+        transport_probe_cache[url] = selected
+    return selected
+
+
+def _open_capture_with_transport(cap, url: str, transport: str):
+    previous = os.getenv("OPENCV_FFMPEG_CAPTURE_OPTIONS")
+    options = _capture_options_for_transport(transport)
+    with capture_open_lock:
+        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = options
+        try:
+            cap.open(url)
+        finally:
+            if previous is None:
+                os.environ.pop("OPENCV_FFMPEG_CAPTURE_OPTIONS", None)
+            else:
+                os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = previous
+
+
+def _preview_ffmpeg_command(url: str, transport: str) -> list[str]:
+    return [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-rtsp_transport",
+        transport,
+        "-i",
+        url,
+        "-an",
+        "-vf",
+        "fps=6,scale=320:240:force_original_aspect_ratio=decrease,pad=320:240:(ow-iw)/2:(oh-ih)/2:color=black",
+        "-q:v",
+        "7",
+        "-f",
+        "image2pipe",
+        "-vcodec",
+        "mjpeg",
+        "pipe:1",
+    ]
+
+
+def _cleanup_preview_ffmpeg_workers():
+    now = _now_ms()
+    idle_ms = 120_000
+    with preview_ffmpeg_workers_lock:
+        stale = []
+        for idx, worker in preview_ffmpeg_workers.items():
+            if now - int(worker.get("last_access_ms", 0)) > idle_ms:
+                stale.append(idx)
+        for idx in stale:
+            preview_ffmpeg_workers[idx]["running"] = False
+            del preview_ffmpeg_workers[idx]
+
+
+def _preview_ffmpeg_capture_worker(worker):
+    while worker["running"]:
+        url = worker["url"]
+        transport = str(worker.get("transport", "") or "").strip().lower()
+        if transport not in ("tcp", "udp"):
+            transport = _probe_rtsp_transport(url)
+            worker["transport"] = transport
+        try:
+            proc = subprocess.Popen(
+                _preview_ffmpeg_command(url, transport),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                bufsize=0,
+            )
+        except OSError:
+            worker["last_error"] = f"ffmpeg preview failed to start ({transport})"
+            time.sleep(1.0)
+            continue
+        stdout = proc.stdout
+        if stdout is None:
+            proc.kill()
+            worker["last_error"] = "ffmpeg preview has no stdout"
+            time.sleep(1.0)
+            continue
+        worker["last_error"] = ""
+        worker["status"] = "streaming"
+        buffer = bytearray()
+        try:
+            while worker["running"]:
+                chunk = stdout.read(8192)
+                if not chunk:
+                    break
+                buffer.extend(chunk)
+                while True:
+                    start = buffer.find(b"\xff\xd8")
+                    if start < 0:
+                        if len(buffer) > 2:
+                            del buffer[:-2]
+                        break
+                    end = buffer.find(b"\xff\xd9", start + 2)
+                    if end < 0:
+                        if start > 0:
+                            del buffer[:start]
+                        break
+                    jpeg = bytes(buffer[start:end + 2])
+                    del buffer[:end + 2]
+                    worker["latest_jpeg"] = jpeg
+                    worker["last_frame_ms"] = _now_ms()
+        finally:
+            try:
+                stdout.close()
+            except Exception:
+                pass
+            if proc.poll() is None:
+                proc.kill()
+            try:
+                proc.wait(timeout=0.5)
+            except Exception:
+                pass
+        worker["status"] = "reconnecting"
+        if worker["running"]:
+            time.sleep(0.5)
+
+
+def _get_or_start_preview_ffmpeg_worker(stream_idx: int, stream_url: str):
+    with preview_ffmpeg_workers_lock:
+        worker = preview_ffmpeg_workers.get(stream_idx)
+        if worker is not None and worker.get("url") != stream_url:
+            worker["running"] = False
+            del preview_ffmpeg_workers[stream_idx]
+            worker = None
+        if worker is None:
+            worker = {
+                "idx": stream_idx,
+                "url": stream_url,
+                "transport": "",
+                "running": True,
+                "latest_jpeg": _encode_black_frame(),
+                "last_frame_ms": 0,
+                "last_access_ms": _now_ms(),
+                "status": "starting",
+                "last_error": "",
+            }
+            preview_ffmpeg_workers[stream_idx] = worker
+            threading.Thread(target=_preview_ffmpeg_capture_worker, args=(worker,), daemon=True).start()
+        worker["last_access_ms"] = _now_ms()
+        return worker
+
+
 def _stream_capture_worker(worker):
     while worker["running"]:
         url = worker["url"]
@@ -1247,15 +1457,19 @@ def _stream_capture_worker(worker):
             worker["last_error"] = ""
             time.sleep(0.3)
             continue
+        transport = str(worker.get("transport", "") or "").strip().lower()
+        if transport not in ("tcp", "udp"):
+            transport = _probe_rtsp_transport(url)
+            worker["transport"] = transport
         worker["status"] = "connecting"
         worker["last_error"] = ""
         cap = cv2.VideoCapture()
         _set_capture_prop(cap, "CAP_PROP_OPEN_TIMEOUT_MSEC", RTSP_OPEN_TIMEOUT_MS)
-        cap.open(url)
+        _open_capture_with_transport(cap, url, transport)
         _configure_capture(cap)
         if not cap.isOpened():
             worker["status"] = "error"
-            worker["last_error"] = "failed to open RTSP stream"
+            worker["last_error"] = f"failed to open RTSP stream ({transport})"
             time.sleep(1.0)
             continue
         worker["status"] = "streaming"
@@ -1289,7 +1503,9 @@ def _stream_capture_worker(worker):
             now = time.time()
             if target_fps > 0 and last_emit > 0 and (now - last_emit) < (1.0 / target_fps):
                 continue
-            frame = _fit_frame(frame)
+            source_frame = frame
+            preview_frame = _letterbox_frame_for_size(source_frame, FRAME_SIZE)
+            frame = _fit_frame(source_frame)
             if cfg.get("motion_enabled", False):
                 motion_cfg = _motion_detector_settings(cfg)
                 next_motion_sig = _motion_detector_signature(motion_cfg)
@@ -1305,12 +1521,17 @@ def _stream_capture_worker(worker):
             else:
                 worker["motion_ratio"] = 0.0
             frame = _enhance_frame(frame, cfg["contrast"], cfg["brightness"], cfg["saturation"], preset)
+            preview_frame = _enhance_frame(preview_frame, cfg["contrast"], cfg["brightness"], cfg["saturation"], preset)
             if cfg["swap_rb"]:
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                preview_frame = cv2.cvtColor(preview_frame, cv2.COLOR_BGR2RGB)
             ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), cfg["jpeg_quality"]])
             if not ok:
                 continue
+            ok_preview, preview_buf = cv2.imencode(".jpg", preview_frame, [int(cv2.IMWRITE_JPEG_QUALITY), cfg["jpeg_quality"]])
             worker["latest_jpeg"] = buf.tobytes()
+            if ok_preview:
+                worker["latest_preview_jpeg"] = preview_buf.tobytes()
             worker["last_frame_ms"] = _now_ms()
             worker["status"] = "streaming"
             last_emit = now
@@ -1329,8 +1550,10 @@ def _get_or_start_stream_worker(stream_idx: int, stream_url: str):
             worker = {
                 "idx": stream_idx,
                 "url": stream_url,
+                "transport": "",
                 "running": True,
                 "latest_jpeg": _encode_black_frame(),
+                "latest_preview_jpeg": _encode_black_frame(),
                 "status": "starting",
                 "last_error": "",
                 "last_frame_ms": 0,
@@ -1341,6 +1564,19 @@ def _get_or_start_stream_worker(stream_idx: int, stream_url: str):
             threading.Thread(target=_stream_capture_worker, args=(worker,), daemon=True).start()
         worker["last_access_ms"] = _now_ms()
         return worker
+
+
+def _ensure_all_stream_workers():
+    if not _is_rtsp_mode():
+        return
+    cfg = _settings_for_response()
+    streams = cfg.get("streams", [])
+    for idx, stream in enumerate(streams):
+        stream_url = str(stream.get("url", "")).strip()
+        if not stream_url:
+            continue
+        _get_or_start_stream_worker(idx, stream_url)
+    _cleanup_stream_workers()
 
 
 def _resize_jpeg_to(jpeg_bytes: bytes, size: tuple[int, int], quality: int = 80) -> bytes:
@@ -1368,6 +1604,23 @@ def _fit_frame_for_size(frame, target_size):
     x0 = (resized_w - target_w) // 2
     y0 = (resized_h - target_h) // 2
     return resized[y0:y0 + target_h, x0:x0 + target_w]
+
+
+def _letterbox_frame_for_size(frame, target_size):
+    target_w, target_h = target_size
+    src_h, src_w = frame.shape[:2]
+    if src_w == 0 or src_h == 0:
+        return np.zeros((target_h, target_w, 3), dtype=np.uint8)
+    scale = min(target_w / src_w, target_h / src_h)
+    resized_w = max(1, int(src_w * scale))
+    resized_h = max(1, int(src_h * scale))
+    interpolation = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR
+    resized = cv2.resize(frame, (resized_w, resized_h), interpolation=interpolation)
+    canvas = np.zeros((target_h, target_w, 3), dtype=np.uint8)
+    x0 = (target_w - resized_w) // 2
+    y0 = (target_h - resized_h) // 2
+    canvas[y0:y0 + resized_h, x0:x0 + resized_w] = resized
+    return canvas
 
 
 def _get_frame_bytes(channel_index, ms, client_id):
@@ -1433,6 +1686,7 @@ def init_video_source():
     )
     if _is_rtsp_mode():
         print("RTSP mode enabled")
+        _ensure_all_stream_workers()
     else:
         video_data = process_videos("movies", FRAME_SIZE)
         print(f"Movie mode: loaded {len(video_data)} channels from movies/")
@@ -1511,58 +1765,80 @@ def get_frame_tdisplay(channel_index, ms):
     return Response(data, mimetype='image/jpeg')
 
 
+def _preview_worker_for(channel_index=None, client_id=None):
+    cfg = _settings_for_response()
+    streams = cfg.get("streams", [])
+    if len(streams) <= 0:
+        return None
+    if channel_index is None:
+        resolved_client_id = client_id or _get_request_client_id()
+        idx = _get_client_active_stream_index(resolved_client_id, len(streams))
+        _cleanup_client_sessions(keep_client_id=resolved_client_id)
+    else:
+        idx = max(0, min(int(channel_index), len(streams) - 1))
+    worker = _get_or_start_stream_worker(idx, streams[idx]["url"])
+    _cleanup_stream_workers(keep_idx=idx)
+    return worker
+
+
+def _stream_preview_mjpeg(channel_index=None, client_id=None):
+    boundary = b"--frame\r\n"
+    while True:
+        worker = _preview_worker_for(channel_index=channel_index, client_id=client_id)
+        frame = worker.get("latest_preview_jpeg") if worker else None
+        if not frame:
+            frame = _encode_black_frame()
+        yield boundary
+        yield b"Content-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
+        time.sleep(0.08)
+
+
 @app.route("/preview.mjpg")
 def preview_mjpg():
     client_id = _get_request_client_id()
-
-    def _generate(forced_idx=None):
-        boundary = b"--frame\r\n"
-        while True:
-            cfg = _settings_for_response()
-            streams = cfg.get("streams", [])
-            if len(streams) > 0:
-                if forced_idx is None:
-                    idx = _get_client_active_stream_index(client_id, len(streams))
-                    _cleanup_client_sessions(keep_client_id=client_id)
-                else:
-                    idx = max(0, min(int(forced_idx), len(streams) - 1))
-                worker = _get_or_start_stream_worker(idx, streams[idx]["url"])
-                _cleanup_stream_workers(keep_idx=idx)
-                frame = worker.get("latest_jpeg") or _encode_black_frame()
-            else:
-                frame = _encode_black_frame()
-            yield boundary
-            yield b"Content-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
-            # Match primary preview cadence so side feeds feel equivalent.
-            time.sleep(0.08)
-
-    return Response(_generate(), mimetype="multipart/x-mixed-replace; boundary=frame")
+    return Response(
+        _stream_preview_mjpeg(client_id=client_id),
+        mimetype="multipart/x-mixed-replace; boundary=frame",
+    )
 
 
 @app.route("/preview/<int:channel_index>.mjpg")
 def preview_channel_mjpg(channel_index):
-    def _generate():
-        boundary = b"--frame\r\n"
-        while True:
-            cfg = _settings_for_response()
-            streams = cfg.get("streams", [])
-            if len(streams) > 0:
-                idx = max(0, min(int(channel_index), len(streams) - 1))
-                worker = _get_or_start_stream_worker(idx, streams[idx]["url"])
-                _cleanup_stream_workers(keep_idx=idx)
-                frame = worker.get("latest_jpeg") or _encode_black_frame()
-            else:
-                frame = _encode_black_frame()
-            yield boundary
-            yield b"Content-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
-            time.sleep(0.08)
+    return Response(
+        _stream_preview_mjpeg(channel_index=channel_index),
+        mimetype="multipart/x-mixed-replace; boundary=frame",
+    )
 
-    return Response(_generate(), mimetype="multipart/x-mixed-replace; boundary=frame")
+
+@app.route("/preview/<int:channel_index>.jpg")
+def preview_channel_jpg(channel_index):
+    cfg = _settings_for_response()
+    streams = cfg.get("streams", [])
+    if len(streams) <= 0:
+        return Response(_encode_black_frame(), mimetype="image/jpeg")
+    idx = max(0, min(int(channel_index), len(streams) - 1))
+    stream_url = streams[idx]["url"]
+    worker = _get_or_start_stream_worker(idx, stream_url)
+    _cleanup_stream_workers(keep_idx=idx)
+    frame = None
+    if int(worker.get("last_frame_ms", 0) or 0) > 0:
+        frame = worker.get("latest_preview_jpeg")
+    if not frame:
+        preview_worker = _get_or_start_preview_ffmpeg_worker(idx, stream_url)
+        _cleanup_preview_ffmpeg_workers()
+        if int(preview_worker.get("last_frame_ms", 0) or 0) > 0:
+            frame = preview_worker.get("latest_jpeg")
+    if not frame:
+        frame = worker.get("latest_preview_jpeg")
+    if not frame:
+        frame = _encode_black_frame()
+    return Response(frame, mimetype="image/jpeg")
 
 
 @app.route("/api/settings", methods=["GET"])
 def api_get_settings():
     client_id = _get_request_client_id()
+    _ensure_all_stream_workers()
     cfg = _settings_for_response()
     with capture_state_lock:
         state = dict(capture_state)
@@ -1600,10 +1876,30 @@ def api_get_settings():
             }
             for idx, worker in stream_workers.items()
         }
+    with preview_ffmpeg_workers_lock:
+        preview_snapshots = {
+            int(idx): {
+                "status": str(worker.get("status", "")),
+                "last_error": str(worker.get("last_error", "")),
+                "last_frame_ms": int(worker.get("last_frame_ms", 0) or 0),
+            }
+            for idx, worker in preview_ffmpeg_workers.items()
+        }
     now_ms = _now_ms()
     stream_states = []
     for idx, stream in enumerate(streams):
         worker = worker_snapshots.get(idx, {})
+        preview_worker = preview_snapshots.get(idx, {})
+        worker_last_frame_ms = int(worker.get("last_frame_ms", 0) or 0)
+        preview_last_frame_ms = int(preview_worker.get("last_frame_ms", 0) or 0)
+        effective_last_frame_ms = max(worker_last_frame_ms, preview_last_frame_ms)
+        effective_status = str(worker.get("status", "idle"))
+        effective_last_error = str(worker.get("last_error", ""))
+        if preview_last_frame_ms > worker_last_frame_ms:
+            effective_status = str(preview_worker.get("status", effective_status or "streaming"))
+            effective_last_error = str(preview_worker.get("last_error", effective_last_error))
+        if effective_last_frame_ms > 0 and effective_status in ("starting", "connecting", "reconnecting", "error"):
+            effective_status = "streaming"
         motion_active_for_idx = bool(
             motion_snapshot.get("active", False)
             and now_ms < int(motion_snapshot.get("triggered_until_ms", 0))
@@ -1614,9 +1910,9 @@ def api_get_settings():
             "idx": int(idx),
             "name": str(stream.get("name", f"Stream {idx + 1}")),
             "source": str(stream.get("url", "")),
-            "status": str(worker.get("status", "idle")),
-            "last_error": str(worker.get("last_error", "")),
-            "last_frame_ms": int(worker.get("last_frame_ms", 0) or 0),
+            "status": effective_status,
+            "last_error": effective_last_error,
+            "last_frame_ms": effective_last_frame_ms,
             "motion_ratio": float(worker.get("motion_ratio", 0.0) or 0.0),
             "motion_active": motion_active_for_idx,
             "voice_last_sent_ms": int(voice_snapshot.get("last_sent_ms", 0) or 0) if voice_for_idx else 0,
@@ -1881,6 +2177,7 @@ def api_set_settings():
     now_rtsp_mode = len(applied.get("streams", [])) > 0
     if now_rtsp_mode:
         _set_capture_state(status="starting", source="", last_error="")
+        _ensure_all_stream_workers()
     else:
         _set_capture_state(status="idle", source="", last_error="")
         if len(video_data) == 0:
@@ -2323,7 +2620,8 @@ def admin_ui():
     .preview {
       width: 100%;
       aspect-ratio: 4 / 3;
-      object-fit: cover;
+      object-fit: contain;
+      object-position: center;
       border-radius: 12px;
       border: 2px solid #d7e2ef;
       background: #0c1420;
@@ -2363,7 +2661,8 @@ def admin_ui():
     .feed-thumb {
       width: 100%;
       aspect-ratio: 4 / 3;
-      object-fit: cover;
+      object-fit: contain;
+      object-position: center;
       border-radius: 12px;
       border: 2px solid #d7e2ef;
       background: #0c1420;
@@ -2485,6 +2784,7 @@ def admin_ui():
       <div class="actions">
         <button class="primary" id="save_btn">Apply All Changes</button>
         <button class="secondary" id="refresh_btn">Reload Current</button>
+        <button class="secondary" id="open_video_feeds_btn" type="button">Open Video Feeds</button>
       </div>
       <div id="status_box" class="status">Loading…</div>
     </section>
@@ -2933,6 +3233,10 @@ def admin_ui():
       return path + (path.includes("?") ? "&" : "?") + "cid=" + encodeURIComponent(clientId);
     }
 
+    function pageIsVisible() {
+      return !document.hidden;
+    }
+
     const SECTION_STATE_KEY = "esp32_tv_admin_sections_v1";
     const DEFAULT_SECTION_STATE = {
       streams: true,
@@ -2959,7 +3263,7 @@ def admin_ui():
         body: [
           "Each tile shows a live preview for one saved stream.",
           "The text beneath each tile shows the source URL, last frame time, motion state, and the last voice alert result for that stream.",
-          "Click a tile to make this browser switch to that stream."
+          "This panel is read-only. It does not switch streams and does not track a selected tile."
         ]
       },
       image: {
@@ -3186,7 +3490,30 @@ def admin_ui():
     const activeStreamEl = document.getElementById("active_stream_index");
     const allFeedsGridEl = document.getElementById("all_feeds_grid");
 
-    function renderAllFeedsGrid(streams, activeIndex) {
+    function refreshAdminFeedSnapshots() {
+      if (!allFeedsGridEl) return;
+      const stamp = Date.now();
+      allFeedsGridEl.querySelectorAll(".feed-thumb[data-snapshot-base]").forEach((img) => {
+        img.src = img.dataset.snapshotBase + "&ts=" + stamp;
+      });
+    }
+
+    function stopAdminFeedStreams() {
+      if (!allFeedsGridEl) return;
+      allFeedsGridEl.querySelectorAll(".feed-thumb[data-snapshot-base]").forEach((img) => {
+        img.removeAttribute("src");
+      });
+    }
+
+    function syncAdminFeedStreams() {
+      if (pageIsVisible()) {
+        refreshAdminFeedSnapshots();
+      } else {
+        stopAdminFeedStreams();
+      }
+    }
+
+    function renderAllFeedsGrid(streams) {
       if (!allFeedsGridEl) return;
       allFeedsGridEl.innerHTML = "";
       if (!streams || streams.length === 0) {
@@ -3197,15 +3524,14 @@ def admin_ui():
         return;
       }
       streams.forEach((stream, i) => {
-        const item = document.createElement("button");
-        item.type = "button";
-        item.className = "feed-tile" + (Number(activeIndex) === i ? " active" : "");
+        const item = document.createElement("article");
+        item.className = "feed-tile";
         item.dataset.idx = String(i);
         const img = document.createElement("img");
         img.className = "feed-thumb";
         img.alt = stream.name || `Stream ${i + 1}`;
         img.dataset.idx = String(i);
-        img.src = withCid(`/preview/${i}.mjpg`);
+        img.dataset.snapshotBase = withCid(`/preview/${i}.jpg`);
         const head = document.createElement("div");
         head.className = "feed-head";
         const route = stream.motion_voice
@@ -3253,18 +3579,9 @@ def admin_ui():
         item.appendChild(head);
         item.appendChild(url);
         item.appendChild(stats);
-        item.addEventListener("click", () => {
-          activeStreamEl.value = String(i);
-          activeStreamEl.dispatchEvent(new Event("change"));
-        });
         allFeedsGridEl.appendChild(item);
       });
-    }
-
-    function setAllFeedsActive(activeIndex) {
-      document.querySelectorAll(".feed-tile").forEach((item) => {
-        item.classList.toggle("active", Number(item.dataset.idx) === Number(activeIndex));
-      });
+      syncAdminFeedStreams();
     }
 
     function getStreamRows() {
@@ -3303,7 +3620,7 @@ def admin_ui():
         idx = Math.max(0, Math.min(Number(selectedIndex || 0), streams.length - 1));
         activeStreamEl.value = String(idx);
       }
-      renderAllFeedsGrid(streams, idx);
+      renderAllFeedsGrid(streams);
     }
 
     function addStreamRow(stream, shouldRefresh) {
@@ -3425,7 +3742,6 @@ def admin_ui():
           : "idle";
       }
       if (runtimeErrorEl) runtimeErrorEl.textContent = st.last_error || "-";
-      setAllFeedsActive(Number((st.active_stream_index ?? activeStreamEl.value) || 0));
     }
 
     function hydrate(data) {
@@ -3533,6 +3849,9 @@ def admin_ui():
 
     document.getElementById("save_btn").addEventListener("click", saveSettings);
     document.getElementById("refresh_btn").addEventListener("click", loadSettings);
+    document.getElementById("open_video_feeds_btn").addEventListener("click", () => {
+      window.open("/video-feeds", "_blank");
+    });
     document.getElementById("preset_fps_btn").addEventListener("click", () => applyPreset("max_fps"));
     document.getElementById("preset_quality_btn").addEventListener("click", () => applyPreset("best_quality"));
     document.getElementById("ha_direct_tts_enabled").addEventListener("change", () => {
@@ -3565,7 +3884,6 @@ def admin_ui():
       if (streams[idx]) {
         document.getElementById("rtsp_url").value = streams[idx].url;
       }
-      setAllFeedsActive(idx);
       isDirty = true;
     });
     document.getElementById("rtsp_url").addEventListener("input", () => {
@@ -3718,14 +4036,452 @@ def admin_ui():
     populateFirmwareDefaultsFromSettings();
     loadFlashStatus().catch(() => setFlashStatus("Failed to load flash status", "err"));
     setInterval(() => {
+      if (!pageIsVisible()) return;
+      refreshAdminFeedSnapshots();
+    }, 350);
+    setInterval(() => {
+      if (!pageIsVisible()) return;
       fetch(withCid("/api/settings"))
         .then(r => r.json())
         .then(d => updateState(d.state, d.stream_states || []))
         .catch(() => {});
-    }, 1500);
-    setInterval(() => {
-      loadFlashStatus().catch(() => {});
     }, 2000);
+    setInterval(() => {
+      if (!pageIsVisible()) return;
+      loadFlashStatus().catch(() => {});
+    }, 5000);
+    document.addEventListener("visibilitychange", () => {
+      syncAdminFeedStreams();
+      if (!pageIsVisible()) return;
+      fetch(withCid("/api/settings"))
+        .then(r => r.json())
+        .then(d => updateState(d.state, d.stream_states || []))
+        .catch(() => {});
+      loadFlashStatus().catch(() => {});
+    });
+  </script>
+</body>
+</html>""",
+        app_version=APP_VERSION
+    )
+
+
+@app.route("/video-feeds")
+def video_feeds_ui():
+    return render_template_string(
+        """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Video Feeds</title>
+  <style>
+    :root {
+      --bg-1: #0b1320;
+      --bg-2: #16243a;
+      --panel: rgba(255,255,255,0.9);
+      --ink: #132033;
+      --muted: #516176;
+      --accent: #0d8fdf;
+      --ok: #15803d;
+      --warn: #b45309;
+      --error: #b91c1c;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Space Grotesk", "Avenir Next", "Segoe UI", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(1100px 700px at 90% -10%, #265685, transparent 70%),
+        radial-gradient(1100px 700px at -10% 110%, #1c3a59, transparent 70%),
+        linear-gradient(160deg, var(--bg-1), var(--bg-2));
+      min-height: 100vh;
+      padding: 22px;
+    }
+    .wrap {
+      max-width: 1400px;
+      margin: 0 auto;
+      display: grid;
+      gap: 18px;
+    }
+    .card {
+      background: var(--panel);
+      border-radius: 18px;
+      padding: 18px;
+      box-shadow: 0 18px 40px rgba(0,0,0,0.25);
+      backdrop-filter: blur(6px);
+    }
+    .head {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    h1 {
+      margin: 0 0 6px;
+      font-size: 28px;
+      letter-spacing: .2px;
+    }
+    p { margin: 0; color: var(--muted); }
+    .pill {
+      display: inline-block;
+      font-weight: 700;
+      font-size: 12px;
+      border-radius: 999px;
+      padding: 4px 10px;
+      background: #dbeafe;
+      color: #1e3a8a;
+      margin-bottom: 8px;
+    }
+    .actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .button-link, button {
+      border: 0;
+      border-radius: 10px;
+      padding: 10px 14px;
+      font-weight: 700;
+      cursor: pointer;
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .button-link {
+      background: #e2e8f0;
+      color: #1f2937;
+    }
+    button {
+      background: var(--accent);
+      color: #fff;
+    }
+    .status {
+      padding: 10px 12px;
+      border-radius: 12px;
+      background: #eef6ff;
+      font-size: 13px;
+      color: #355070;
+    }
+    .status.ok { color: var(--ok); }
+    .status.warn { color: var(--warn); }
+    .status.err { color: var(--error); }
+    .feeds-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+    }
+    .feed-tile {
+      width: 100%;
+      display: block;
+      text-align: left;
+      border: 1px solid #d6deea;
+      border-radius: 14px;
+      background: #f8fbff;
+      padding: 0;
+      overflow: hidden;
+      color: #1f2937;
+      box-shadow: 0 8px 20px rgba(8, 21, 37, 0.06);
+    }
+    .feed-tile.active {
+      border-color: #0d8fdf;
+      box-shadow: inset 0 0 0 2px #0d8fdf, 0 10px 24px rgba(13, 143, 223, 0.14);
+      background: #eaf5ff;
+    }
+    .feed-thumb {
+      width: 100%;
+      aspect-ratio: 4 / 3;
+      object-fit: contain;
+      object-position: center;
+      display: block;
+      background: #0c1420;
+      border-bottom: 1px solid #d7e2ef;
+    }
+    .feed-head {
+      font-size: 14px;
+      font-weight: 800;
+      color: #1f2f46;
+      padding: 10px 10px 0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .feed-url {
+      font-size: 11px;
+      color: #58687d;
+      padding: 4px 10px 10px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .feed-stats {
+      border-top: 1px solid #d7e2ef;
+      background: #f2f7fd;
+      padding: 8px 10px 10px;
+      display: grid;
+      gap: 5px;
+    }
+    .feed-stat {
+      font-size: 12px;
+      color: #475569;
+      line-height: 1.3;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    @media (max-width: 900px) {
+      .head {
+        flex-direction: column;
+        align-items: stretch;
+      }
+      .feeds-grid {
+        grid-template-columns: 1fr;
+      }
+      .actions {
+        width: 100%;
+      }
+      .button-link, button {
+        width: 100%;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="card">
+      <div class="head">
+        <div>
+          <div class="pill">Version {{ app_version }}</div>
+          <h1>Video Feeds</h1>
+          <p>Saved feeds only. This page is a read-only live monitor for every configured feed.</p>
+        </div>
+        <div class="actions">
+          <a class="button-link" href="/admin">Back To Control</a>
+          <button type="button" id="refresh_feeds_btn">Refresh Now</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div id="video_feeds_status" class="status">Loading feeds...</div>
+    </section>
+
+    <section class="card">
+      <div id="video_feeds_grid" class="feeds-grid"></div>
+    </section>
+  </div>
+
+  <script>
+    const statusEl = document.getElementById("video_feeds_status");
+    const gridEl = document.getElementById("video_feeds_grid");
+    let renderedSignature = "";
+
+    function pageIsVisible() {
+      return !document.hidden;
+    }
+
+    function setStatus(message, mode) {
+      statusEl.textContent = message;
+      statusEl.className = "status " + (mode || "");
+    }
+
+    function streamsSignature(streams) {
+      return JSON.stringify((streams || []).map((stream) => [
+        stream.name || "",
+        stream.url || "",
+        !!stream.motion_voice,
+        stream.voice_entity || ""
+      ]));
+    }
+
+    function refreshVideoFeedSnapshots() {
+      const stamp = Date.now();
+      gridEl.querySelectorAll(".feed-thumb[data-snapshot-base]").forEach((img) => {
+        img.src = img.dataset.snapshotBase + "&ts=" + stamp;
+      });
+    }
+
+    function stopVideoFeedStreams() {
+      gridEl.querySelectorAll(".feed-thumb[data-snapshot-base]").forEach((img) => {
+        img.removeAttribute("src");
+      });
+    }
+
+    function startVideoFeedStreams() {
+      refreshVideoFeedSnapshots();
+    }
+
+    function syncVideoFeedStreams() {
+      if (pageIsVisible()) {
+        startVideoFeedStreams();
+      } else {
+        stopVideoFeedStreams();
+      }
+    }
+
+    function renderFeeds(streams) {
+      const signature = streamsSignature(streams);
+      if (signature === renderedSignature) {
+        syncVideoFeedStreams();
+        return;
+      }
+      renderedSignature = signature;
+      gridEl.innerHTML = "";
+      if (!streams || streams.length === 0) {
+        const empty = document.createElement("div");
+        empty.className = "feed-stat";
+        empty.textContent = "No saved feeds configured.";
+        gridEl.appendChild(empty);
+        return;
+      }
+      streams.forEach((stream, i) => {
+        const item = document.createElement("article");
+        item.className = "feed-tile";
+        item.dataset.idx = String(i);
+
+        const img = document.createElement("img");
+        img.className = "feed-thumb";
+        img.alt = stream.name || `Stream ${i + 1}`;
+        img.dataset.snapshotBase = `/preview/${i}.jpg`;
+
+        const head = document.createElement("div");
+        head.className = "feed-head";
+        const route = stream.motion_voice
+          ? (stream.voice_entity ? ` [voice:${stream.voice_entity}]` : " [voice]")
+          : "";
+        head.textContent = `${i + 1}. ${stream.name || `Stream ${i + 1}`}${route}`;
+
+        const url = document.createElement("div");
+        url.className = "feed-url";
+        url.textContent = stream.url || "-";
+
+        const stats = document.createElement("div");
+        stats.className = "feed-stats";
+
+        const sourceRow = document.createElement("div");
+        sourceRow.className = "feed-stat";
+        sourceRow.innerHTML = "<strong>Source:</strong> ";
+        const sourceValue = document.createElement("span");
+        sourceValue.className = "feed-source";
+        sourceValue.textContent = stream.url || "-";
+        sourceRow.appendChild(sourceValue);
+
+        const frameRow = document.createElement("div");
+        frameRow.className = "feed-stat";
+        frameRow.innerHTML = "<strong>Last frame:</strong> ";
+        const frameValue = document.createElement("span");
+        frameValue.className = "feed-frame";
+        frameValue.textContent = "-";
+        frameRow.appendChild(frameValue);
+
+        const motionRow = document.createElement("div");
+        motionRow.className = "feed-stat";
+        motionRow.innerHTML = "<strong>Motion detection:</strong> ";
+        const motionValue = document.createElement("span");
+        motionValue.className = "feed-motion";
+        motionValue.textContent = "idle";
+        motionRow.appendChild(motionValue);
+
+        const voiceRow = document.createElement("div");
+        voiceRow.className = "feed-stat";
+        voiceRow.innerHTML = "<strong>Voice alert:</strong> ";
+        const voiceValue = document.createElement("span");
+        voiceValue.className = "feed-voice";
+        voiceValue.textContent = "idle";
+        voiceRow.appendChild(voiceValue);
+
+        stats.appendChild(sourceRow);
+        stats.appendChild(frameRow);
+        stats.appendChild(motionRow);
+        stats.appendChild(voiceRow);
+
+        item.appendChild(img);
+        item.appendChild(head);
+        item.appendChild(url);
+        item.appendChild(stats);
+        gridEl.appendChild(item);
+      });
+      syncVideoFeedStreams();
+    }
+
+    function updateStates(streamStates) {
+      const latestStreamStates = Array.isArray(streamStates) ? streamStates : [];
+      const byIdx = new Map();
+      latestStreamStates.forEach((entry) => {
+        byIdx.set(Number(entry.idx), entry || {});
+      });
+      document.querySelectorAll(".feed-tile").forEach((item) => {
+        const idx = Number(item.dataset.idx || 0);
+        const entry = byIdx.get(idx) || {};
+        const sourceEl = item.querySelector(".feed-source");
+        const frameEl = item.querySelector(".feed-frame");
+        const motionEl = item.querySelector(".feed-motion");
+        const voiceEl = item.querySelector(".feed-voice");
+        const fallbackSource = (item.querySelector(".feed-url") || {}).textContent || "-";
+        if (sourceEl) {
+          sourceEl.textContent = entry.source || fallbackSource;
+        }
+        if (frameEl) {
+          frameEl.textContent = entry.last_frame_ms ? new Date(Number(entry.last_frame_ms)).toLocaleTimeString() : "-";
+        }
+        if (motionEl) {
+          motionEl.textContent = entry.motion_active
+            ? `detected (${(Number(entry.motion_ratio || 0)).toFixed(2)}%)`
+            : "idle";
+        }
+        if (voiceEl) {
+          const voiceErr = entry.voice_last_error || "";
+          if (voiceErr) {
+            voiceEl.textContent = `error: ${voiceErr}`;
+          } else if (entry.voice_last_sent_ms) {
+            const speaker = entry.voice_last_speaker_entity || "default";
+            voiceEl.textContent = `sent -> ${speaker} @ ${new Date(Number(entry.voice_last_sent_ms)).toLocaleTimeString()}`;
+          } else {
+            voiceEl.textContent = "idle";
+          }
+        }
+      });
+    }
+
+    async function refreshFeeds() {
+      const res = await fetch("/api/settings");
+      const data = await res.json();
+      const settings = data.settings || {};
+      const streams = settings.streams || [];
+      const streamStates = data.stream_states || [];
+      renderFeeds(streams);
+      updateStates(streamStates);
+      if (streams.length === 0) {
+        setStatus("No saved feeds configured yet.", "warn");
+      } else {
+        const streamingCount = streamStates.filter((entry) => (entry && entry.status) === "streaming").length;
+        const suffix = streamingCount ? ` | ${streamingCount} streaming` : "";
+        setStatus(`Showing ${streams.length} saved feed${streams.length === 1 ? "" : "s"}${suffix}`, "ok");
+      }
+    }
+
+    document.getElementById("refresh_feeds_btn").addEventListener("click", () => {
+      refreshFeeds().catch(() => setStatus("Failed to load feeds", "err"));
+    });
+
+    refreshFeeds().catch(() => setStatus("Failed to load feeds", "err"));
+    setInterval(() => {
+      if (!pageIsVisible()) return;
+      refreshVideoFeedSnapshots();
+    }, 350);
+    setInterval(() => {
+      if (!pageIsVisible()) return;
+      refreshFeeds().catch(() => {});
+    }, 2000);
+    document.addEventListener("visibilitychange", () => {
+      syncVideoFeedStreams();
+      if (!pageIsVisible()) return;
+      refreshFeeds().catch(() => {});
+    });
   </script>
 </body>
 </html>""",
