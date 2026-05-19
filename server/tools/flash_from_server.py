@@ -142,7 +142,11 @@ def main():
         for idx, part in enumerate(parts):
             offset = int(part["offset"])
             part_url = urllib.parse.urljoin(base_url + "/", str(part["path"]).lstrip("/"))
-            filename = os.path.basename(urllib.parse.urlparse(part_url).path) or f"part-{idx}.bin"
+            base_name = os.path.basename(urllib.parse.urlparse(part_url).path) or "part.bin"
+            # Some manifests intentionally use the same payload id for different
+            # routes (e.g. boot_app0 and app). Prefix with index to avoid local
+            # filename collisions in the temp directory.
+            filename = f"{idx:02d}-{base_name}"
             local_path = os.path.join(tmp, filename)
             print(f"Downloading {part_url}")
             _download(part_url, local_path)

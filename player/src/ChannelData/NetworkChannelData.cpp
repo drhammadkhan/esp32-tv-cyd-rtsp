@@ -18,7 +18,14 @@ bool NetworkChannelData::fetchChannelData() {
   }
   // make a HTTP request to get the channel data
   HTTPClient http;
-  http.begin(mChannelInfoURL.c_str());
+  http.setReuse(false);
+  http.useHTTP10(true);
+  http.setConnectTimeout(3000);
+  http.setTimeout(3000);
+  if (!http.begin(mChannelInfoURL.c_str())) {
+    Serial.println("HTTP begin failed");
+    return false;
+  }
   int httpCode = http.GET();
   if (httpCode == HTTP_CODE_OK) {
     // read and parse the full JSON payload safely
@@ -28,6 +35,7 @@ bool NetworkChannelData::fetchChannelData() {
     DeserializationError error = deserializeJson(doc, response);
     if (error) {
       Serial.println("Failed to parse channel data");
+      http.end();
       return false;
     }
     mChannelLengths.clear();
@@ -35,9 +43,12 @@ bool NetworkChannelData::fetchChannelData() {
     for (int i=0; i<doc.size(); i++) {
       mChannelLengths.push_back(doc[i]);
     }
-    return mChannelLengths.size() > 0;
+    bool ok = mChannelLengths.size() > 0;
+    http.end();
+    return ok;
   } else {
     Serial.printf("HTTP error: %d\n", httpCode);
+    http.end();
     return false;
   }
 }

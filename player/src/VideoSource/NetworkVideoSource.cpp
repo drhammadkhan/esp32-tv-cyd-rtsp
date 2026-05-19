@@ -14,7 +14,10 @@ void NetworkVideoSource::_frameDownloaderTask(void *param)
 void NetworkVideoSource::frameDownloaderTask()
 {
   HTTPClient http;
-  http.setReuse(true);
+  http.setReuse(false);
+  http.useHTTP10(true);
+  http.setConnectTimeout(3000);
+  http.setTimeout(3000);
   uint8_t *downloadBuffer = NULL;
   int downloadBufferLength = 0;
   uint32_t okFrames = 0;
@@ -51,8 +54,13 @@ void NetworkVideoSource::frameDownloaderTask()
         Serial.printf("Frame URL sample: %s\n", url.c_str());
         loggedUrl = true;
       }
-      http.begin(url.c_str());
-int httpCode = http.GET();
+      if (!http.begin(url.c_str()))
+      {
+        Serial.println("HTTP begin failed");
+        vTaskDelay(50 / portTICK_PERIOD_MS);
+        continue;
+      }
+      int httpCode = http.GET();
 
       if (httpCode == HTTP_CODE_OK)
       {
@@ -115,6 +123,7 @@ int httpCode = http.GET();
           jpegLength = total;
         }
         if (jpegLength <= 0) {
+          http.end();
           vTaskDelay(10 / portTICK_PERIOD_MS);
           continue;
         }
@@ -151,10 +160,12 @@ int httpCode = http.GET();
         // unlock the image buffer
         xSemaphoreGive(mCurrentFrameMutex);
         // Serial.printf("Read %d bytes in %d ms\n", download_image_length, millis() - start_download_time);
+        http.end();
       }
       else
       {
         Serial.printf("HTTP error: %d\n", httpCode);
+        http.end();
         vTaskDelay(10 / portTICK_PERIOD_MS);
       }
     }

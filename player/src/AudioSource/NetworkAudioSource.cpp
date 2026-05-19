@@ -23,6 +23,10 @@ int NetworkAudioSource::getAudioSamples(uint8_t **buffer, size_t &bufferSize, in
       bufferSize = SAMPLES_PER_CHUNK;
     }
     std::string url = mChannelData->getAudioURL() + "/" + std::to_string(currentAudioSample) + "/" + std::to_string(bufferSize) + mChannelData->getClientQuery();
+    http.setReuse(false);
+    http.useHTTP10(true);
+    http.setConnectTimeout(3000);
+    http.setTimeout(3000);
     http.begin(url.c_str());
     int httpCode = http.GET();
     if (httpCode == HTTP_CODE_OK)
@@ -57,8 +61,10 @@ int NetworkAudioSource::getAudioSamples(uint8_t **buffer, size_t &bufferSize, in
         }
         audioLength = total;
       }
+      http.end();
       return audioLength;
     }
+    http.end();
   }
   return 0;
 }

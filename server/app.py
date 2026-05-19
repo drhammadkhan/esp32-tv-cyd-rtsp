@@ -1137,6 +1137,38 @@ def _webflash_templates_exist(board: str):
     return all(p.exists() for p in required)
 
 
+def _find_boot_app0_bin() -> Path | None:
+    override = os.getenv("ESP_BOOT_APP0_BIN", "").strip()
+    if override:
+        candidate = Path(override).expanduser()
+        if candidate.exists():
+            return candidate
+    candidates = [
+        Path.home() / ".platformio" / "packages" / "framework-arduinoespressif32" / "tools" / "partitions" / "boot_app0.bin",
+        Path.home() / ".platformio" / "packages" / "framework-espidf" / "components" / "bootloader" / "subproject" / "main" / "bootloader.bin",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _webflash_layout(board: str) -> dict:
+    layout = {
+        "bootloader_offset": 0x1000,
+        "partitions_offset": 0x8000,
+        "boot_app0_offset": 0xE000,
+        "app_offset": 0x10000,
+        "include_boot_app0": False,
+    }
+    # ESP32-S3 uses a different bootloader offset. Keep layout aligned with
+    # the non-browser CLI flasher to avoid bad images from web installs.
+    if board == "esp32_s3_2p8":
+        layout["bootloader_offset"] = 0x0000
+        layout["include_boot_app0"] = True
+    return layout
+
+
 def _cleanup_webflash_payloads():
     cutoff = _now_ms() - (30 * 60 * 1000)
     with webflash_lock:
@@ -2287,6 +2319,19 @@ def api_webflash_prepare():
     except Exception as ex:
         return jsonify({"ok": False, "error": f"Failed to build custom firmware: {ex}"}), 500
 
+    layout = _webflash_layout(board)
+    boot_app0 = b""
+    warnings = []
+    if layout.get("include_boot_app0", False):
+        boot_app0_path = _find_boot_app0_bin()
+        if boot_app0_path is not None:
+            try:
+                boot_app0 = boot_app0_path.read_bytes()
+            except OSError:
+                warnings.append("boot_app0 could not be read; proceeding without it")
+        else:
+            warnings.append("boot_app0 not found; if the S3 does not boot, use CLI flasher")
+
     payload_id = secrets.token_hex(12)
     _cleanup_webflash_payloads()
     with webflash_lock:
@@ -2295,12 +2340,17 @@ def api_webflash_prepare():
             "board": board,
             "flavor": flavor,
             "firmware": firmware,
+            "layout": layout,
+            "boot_app0": boot_app0,
         }
-    return jsonify({
+    response = {
         "ok": True,
         "manifest_url": f"/api/webflash/manifest/{payload_id}.json",
         "expires_minutes": 30,
-    })
+    }
+    if warnings:
+        response["warnings"] = warnings
+    return jsonify(response)
 
 
 @app.route("/api/webflash/manifest/<payload_id>.json", methods=["GET"])
@@ -2316,20 +2366,36 @@ def api_webflash_manifest(payload_id):
         return jsonify({"ok": False, "error": "Manifest board is not supported"}), 400
     chip_family = str(FLASH_TARGETS[board].get("chip_family", "ESP32")).strip() or "ESP32"
     wf = FLASH_TARGETS[board]["webflash"][flavor]
+    layout = entry.get("layout") or _webflash_layout(board)
+    parts = [
+        {"path": f"/static/firmware/{wf['bootloader']}", "offset": int(layout.get("bootloader_offset", 0x1000))},
+        {"path": f"/static/firmware/{wf['partitions']}", "offset": int(layout.get("partitions_offset", 0x8000))},
+    ]
+    if entry.get("boot_app0"):
+        parts.append({"path": f"/api/webflash/boot_app0/{payload_id}.bin", "offset": int(layout.get("boot_app0_offset", 0xE000))})
+    parts.append({"path": f"/api/webflash/bin/{payload_id}.bin", "offset": int(layout.get("app_offset", 0x10000))})
     manifest = {
         "name": f"ESP32 TV {FLASH_TARGETS[board]['label']} Custom",
         "version": "1.0.0",
         "new_install_prompt_erase": True,
         "builds": [{
             "chipFamily": chip_family,
-            "parts": [
-                {"path": f"/static/firmware/{wf['bootloader']}", "offset": 4096},
-                {"path": f"/static/firmware/{wf['partitions']}", "offset": 32768},
-                {"path": f"/api/webflash/bin/{payload_id}.bin", "offset": 65536},
-            ],
+            "parts": parts,
         }],
     }
     return jsonify(manifest)
+
+
+@app.route("/api/webflash/boot_app0/<payload_id>.bin", methods=["GET"])
+def api_webflash_boot_app0(payload_id):
+    with webflash_lock:
+        entry = webflash_payloads.get(payload_id)
+    if not entry:
+        return Response("Not found", status=404, mimetype="text/plain")
+    boot_app0 = entry.get("boot_app0") or b""
+    if not boot_app0:
+        return Response("Not found", status=404, mimetype="text/plain")
+    return Response(boot_app0, mimetype="application/octet-stream")
 
 
 @app.route("/api/webflash/bin/<payload_id>.bin", methods=["GET"])
@@ -3985,7 +4051,12 @@ def admin_ui():
       }
       const slot = flavor === "audio_on" ? webflashAudioSlot : webflashNoAudioSlot;
       mountWebflashButton(slot, data.manifest_url);
-      setWebflashStatus("Ready. Click Install to choose USB port and flash.", "ok");
+      const warnings = Array.isArray(data.warnings) ? data.warnings.filter(Boolean) : [];
+      if (warnings.length) {
+        setWebflashStatus(`Ready with warnings: ${warnings.join(" | ")}`, "warn");
+      } else {
+        setWebflashStatus("Ready. Click Install to choose USB port and flash.", "ok");
+      }
     }
 
     async function loadFlashStatus() {
