@@ -40,6 +40,7 @@ services:
           description:
             en_us: "Video preprocessing cache."
 x-casaos:
+  id: com.drhammadkhan.esp32-tv-server
   architectures:
     - amd64
     - arm64
@@ -56,6 +57,9 @@ x-casaos:
   index: /admin
   main: esp32-tv-server
   port_map: "8124"
+  scheme: http
+  version: "1.0.0"
+  update_at: "2026-09-06"
   project_url: https://github.com/drhammadkhan/esp32-tv-cyd-rtsp
   store_app_id: esp32-tv-server
   tagline:

@@ -238,6 +238,19 @@ If your CasaOS version only supports compose import, use this raw manifest URL:
 
 - `https://raw.githubusercontent.com/drhammadkhan/esp32-tv-cyd-rtsp/main/Apps/ESP32-TV-Server/docker-compose.yml`
 
+### CasaOS Custom Install Values
+
+If CasaOS asks for the application details separately during an SSH/custom install, use:
+
+- Docker Image: `ghcr.io/drhammadkhan/esp32-tv-cyd-rtsp-server`
+- Tag: `latest`
+- Title: `ESP32 TV Server`
+- Icon URL: `https://raw.githubusercontent.com/drhammadkhan/esp32-tv-cyd-rtsp/main/Apps/ESP32-TV-Server/icon.svg`
+- Web UI port: `8124`
+- Web UI path: `/admin`
+
+The CasaOS compose manifest now includes a stable application ID, explicit version, HTTP scheme, title, icon, thumbnail, and port mapping so these values can also be populated automatically when the CasaOS version supports `x-casaos` metadata.
+
 ## GitHub Container Publishing
 
 This repo includes a workflow that publishes the server image to GHCR on pushes to `main`:
